@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test, coverage and tool caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Local data: databases and user libraries must never be committed
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+/library/
+.lpbfstudio/
+
+# Secrets and local settings
+.env
+.env.*
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Internal review records: kept locally, never published
+docs/audit/

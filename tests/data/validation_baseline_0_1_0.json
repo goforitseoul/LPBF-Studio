@@ -1,0 +1,252 @@
+{
+ "no types": [
+  [
+   "error",
+   "the set has no exposure types"
+  ],
+  [
+   "info",
+   "no Contour: expect rougher side walls and lower accuracy"
+  ],
+  [
+   "warning",
+   "no Hatch or Core: the part interior will not be melted"
+  ]
+ ],
+ "no hatch/core": [
+  [
+   "warning",
+   "no Hatch or Core: the part interior will not be melted"
+  ]
+ ],
+ "no contour": [
+  [
+   "info",
+   "no Contour: expect rougher side walls and lower accuracy"
+  ]
+ ],
+ "infill power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "upskin power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "chess gap power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "contour pass 1 downskin power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "contour pass 0 upskin power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "edge power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "core power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "support power": [
+  [
+   "error",
+   "450.0 W exceeds the machine maximum of 400.0 W"
+  ]
+ ],
+ "infill speed": [
+  [
+   "error",
+   "8000.0 mm/s exceeds the machine maximum of 7000.0 mm/s"
+  ],
+  [
+   "warning",
+   "energy input 8.1 J/mm³ is below 30: risk of lack of fusion"
+  ]
+ ],
+ "chess gap speed": [
+  [
+   "error",
+   "8000.0 mm/s exceeds the machine maximum of 7000.0 mm/s"
+  ]
+ ],
+ "contour pass 0 speed": [
+  [
+   "error",
+   "8000.0 mm/s exceeds the machine maximum of 7000.0 mm/s"
+  ]
+ ],
+ "support speed": [
+  [
+   "error",
+   "8000.0 mm/s exceeds the machine maximum of 7000.0 mm/s"
+  ]
+ ],
+ "layer range": [
+  [
+   "error",
+   "0.12 mm is outside the machine range 0.02–0.1 mm"
+  ],
+  [
+   "warning",
+   "energy input 13.9 J/mm³ is below 30: risk of lack of fusion"
+  ],
+  [
+   "warning",
+   "energy input 22.5 J/mm³ is below 30: risk of lack of fusion"
+  ],
+  [
+   "warning",
+   "energy input 26.0 J/mm³ is below 30: risk of lack of fusion"
+  ]
+ ],
+ "platform temperature": [
+  [
+   "error",
+   "exceeds machine maximum 200.0 °C"
+  ]
+ ],
+ "energy low": [
+  [
+   "warning",
+   "energy input 11.8 J/mm³ is below 30: risk of lack of fusion"
+  ]
+ ],
+ "energy high": [
+  [
+   "warning",
+   "energy input 323.9 J/mm³ is above 150: risk of overheating / keyholing"
+  ]
+ ],
+ "core energy low": [
+  [
+   "warning",
+   "energy input 2.0 J/mm³ is below 30: risk of lack of fusion"
+  ]
+ ],
+ "skin thinner than layer": [
+  [
+   "error",
+   "skin thickness is smaller than one layer"
+  ]
+ ],
+ "skin not multiple": [
+  [
+   "warning",
+   "0.1 mm is not a multiple of the 0.04 mm layer (≈2.50 layers)"
+  ]
+ ],
+ "positive ridge": [
+  [
+   "warning",
+   "positive ridge: even vertical walls will be exposed as skin"
+  ]
+ ],
+ "infill skywriting": [
+  [
+   "warning",
+   "skywriting is off: acceleration at vector ends changes energy input and material properties"
+  ]
+ ],
+ "downskin skywriting": [
+  [
+   "warning",
+   "skywriting is off: energy input varies at vector ends"
+  ]
+ ],
+ "hatch vs stripe": [
+  [
+   "error",
+   "hatch distance must be smaller than the stripe width"
+  ],
+  [
+   "warning",
+   "energy input 12.4 J/mm³ is below 30: risk of lack of fusion"
+  ]
+ ],
+ "stripe overlap": [
+  [
+   "warning",
+   "overlap is at least half the stripe width"
+  ]
+ ],
+ "restriction 90": [
+  [
+   "error",
+   "a 90° restriction blocks every hatch direction"
+  ]
+ ],
+ "rotation 180": [
+  [
+   "warning",
+   "hatch direction never changes between layers: expect anisotropy"
+  ]
+ ],
+ "skipping without skins": [
+  [
+   "warning",
+   "infill skipping without up- and downskin leaves surfaces under-exposed"
+  ]
+ ],
+ "PR factor zero": [
+  [
+   "info",
+   "power reduction is selected but the factor is 0"
+  ]
+ ],
+ "PR factor high": [
+  [
+   "warning",
+   "short vectors drop to 86 W: risk of failed layers from insufficient fusion"
+  ]
+ ],
+ "PR factor unused": [
+  [
+   "info",
+   "factor is set but homogenization is not power reduction"
+  ]
+ ],
+ "core without hatch": [
+  [
+   "warning",
+   "core without Hatch: the skin around the core will not be exposed"
+  ]
+ ],
+ "duplicate pass names": [
+  [
+   "warning",
+   "contour pass names are not unique"
+  ]
+ ],
+ "edge methods off": [
+  [
+   "warning",
+   "both edge methods are off: no edges will be exposed"
+  ]
+ ],
+ "edge factor low": [
+  [
+   "info",
+   "below the minimum edge factor 1.45"
+  ]
+ ]
+}

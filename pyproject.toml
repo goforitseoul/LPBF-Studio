@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lpbf-studio"
+version = "0.1.0"
+description = "Parameter-set editor for laser powder bed fusion (LPBF) build processing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = ["pydantic>=2.5", "click>=8.1"]
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.6"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+lpbf = "lpbfstudio.cli:main"
+
+[project.gui-scripts]
+lpbf-studio = "lpbfstudio.gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
