@@ -7,9 +7,10 @@ section 3.2). It has no caller yet, so no application behaviour changes. These t
 * the lock objects: an ``flock`` on the sets folder's own descriptor (L-A, no lock file) and on the
   migration folder M (``.format1-backup``); M is opened relative to the sets folder, never through
   a link, and is **never created**;
-* exclusive operations: the sets lock first, then the M lock (when an M descriptor is given), both
-  exclusive and non-blocking; normal writers: both shared and non-blocking, M only when it exists,
-  and a re-check for an M that appeared later;
+* exclusive operations: the sets lock first, then the M lock whenever M exists (found and opened
+  here unless the caller passes the descriptor it opened), both exclusive and non-blocking; normal
+  writers: both shared and non-blocking, M only when it exists, and a re-check for an M that
+  appeared later;
 * every request is non-blocking (D-2.1) and made once: no retry, no waiting;
 * the path identity checks after locking: ``stat(sets_path)`` against ``fstat(sets_fd)`` and
   ``fstatat(sets_fd, M, AT_SYMLINK_NOFOLLOW)`` against ``fstat(M_fd)``;
@@ -912,3 +913,403 @@ def test_no_descriptor_leaks_after_refusals(with_m, monkeypatch):
         with locks.acquire_writer(with_m, sfd):
             assert count() == start + 1
         assert count() == start
+
+
+# ================================================================ correction round: M found by acquire_exclusive
+
+
+class Spy:
+    """Records every descriptor ``locks`` opens relative to the sets folder."""
+
+    def __init__(self, monkeypatch):
+        self.fds = []
+        self.real = locks._open_at
+        monkeypatch.setattr(locks, "_open_at", self)
+
+    def __call__(self, dir_fd, name, flags):
+        fd = self.real(dir_fd, name, flags)
+        self.fds.append(fd)
+        return fd
+
+
+def is_closed(fd) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
+
+
+def test_exclusive_with_no_descriptor_still_locks_an_existing_m(with_m, monkeypatch):
+    rec = Recorder(monkeypatch)
+    with opened(with_m) as sfd:
+        with locks.acquire_exclusive(with_m, sfd) as held:
+            assert held.m_fd is not None and held.m_fd != sfd
+            assert rec.locks_taken() == [(sfd, fcntl.LOCK_EX | fcntl.LOCK_NB),
+                                         (held.m_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)]
+            st = os.fstat(held.m_fd)
+            assert (st.st_dev, st.st_ino) == (os.lstat(with_m / M).st_dev, os.lstat(with_m / M).st_ino)
+            assert not free(with_m, fcntl.LOCK_SH) and not free(with_m / M, fcntl.LOCK_SH)
+
+
+def test_exclusive_opens_m_relative_to_sets_never_through_a_link_and_after_the_sets_lock(with_m, monkeypatch):
+    order = []
+    real_open, real_lock = locks._open_at, locks._flock
+
+    def spy_open(dir_fd, name, flags):
+        order.append(("open", dir_fd, name, flags))
+        return real_open(dir_fd, name, flags)
+
+    def spy_lock(fd, op):
+        order.append(("lock", fd, op))
+        return real_lock(fd, op)
+    monkeypatch.setattr(locks, "_open_at", spy_open)
+    monkeypatch.setattr(locks, "_flock", spy_lock)
+    with opened(with_m) as sfd:
+        with locks.acquire_exclusive(with_m, sfd) as held:
+            mfd = held.m_fd
+            assert order[0] == ("lock", sfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            kind, dir_fd, name, flags = order[1]
+            assert (kind, dir_fd, name) == ("open", sfd, M)
+            assert flags & os.O_DIRECTORY and flags & os.O_NOFOLLOW and not flags & os.O_CREAT
+            assert order[2] == ("lock", mfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.parametrize("kind", ["link", "file", "link-to-nothing"])
+def test_exclusive_refuses_an_m_that_is_not_a_plain_folder(sets, kind):
+    if kind == "link":
+        (sets.parent / "elsewhere").mkdir()
+        (sets / M).symlink_to(sets.parent / "elsewhere", target_is_directory=True)
+    elif kind == "file":
+        (sets / M).write_bytes(b"not a folder")
+    else:
+        (sets / M).symlink_to(sets.parent / "nothing")
+    before = snap(sets)
+    with opened(sets) as sfd:
+        r = refused(locks.acquire_exclusive, sets, sfd)
+        assert r.refusal is locks.Refusal.UNVERIFIABLE and r.step is locks.Step.M_OPEN
+        assert r.errno in (errno.ELOOP, errno.ENOTDIR)
+        assert free(sets)  # never continues with the sets lock alone
+    assert snap(sets) == before
+    if kind == "link":
+        assert free(sets.parent / "elsewhere")
+
+
+def test_exclusive_m_open_error_other_than_absent_is_unverifiable(with_m, monkeypatch):
+    def bad(dir_fd, name, flags):
+        raise PermissionError(errno.EACCES, "denied")
+    monkeypatch.setattr(locks, "_open_at", bad)
+    with opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.result == "refused_unverifiable" and r.step is locks.Step.M_OPEN
+        assert r.errno == errno.EACCES and free(with_m)
+
+
+@pytest.mark.parametrize("mode", ["sh", "ex"])
+def test_exclusive_with_no_descriptor_is_busy_at_m_and_releases_everything(with_m, monkeypatch, mode):
+    before = snap(with_m)
+    spy = Spy(monkeypatch)
+    with holder((with_m / M, mode)), opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.refusal is locks.Refusal.BUSY and r.step is locks.Step.M_LOCK
+        assert r.errno in CONTENTION
+        assert free(with_m)
+    assert len(spy.fds) == 1 and is_closed(spy.fds[0])
+    assert snap(with_m) == before
+
+
+def test_exclusive_with_no_descriptor_refuses_a_replaced_m(with_m, monkeypatch):
+    spy = Spy(monkeypatch)
+    real = locks._flock
+    state = {"done": False}
+
+    def swap(fd, op):
+        real(fd, op)
+        if spy.fds and fd == spy.fds[0] and not op & fcntl.LOCK_UN and not state["done"]:
+            os.rename(with_m / M, with_m / "old-m")
+            (with_m / M).mkdir()
+            state["done"] = True
+    monkeypatch.setattr(locks, "_flock", swap)
+    with opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.refusal is locks.Refusal.UNVERIFIABLE and r.step is locks.Step.M_IDENTITY
+        assert free(with_m) and free(with_m / "old-m") and free(with_m / M)
+    assert is_closed(spy.fds[0])
+
+
+@pytest.mark.parametrize("kind", ["different", "error"])
+def test_exclusive_with_no_descriptor_refuses_an_unverifiable_m_identity(with_m, monkeypatch, kind):
+    def fake(dir_fd, name):
+        if kind == "error":
+            raise OSError(errno.EIO, "fstatat failed")
+        return os.stat(with_m / "A.json")
+    monkeypatch.setattr(locks, "_lstat_at", fake)
+    spy = Spy(monkeypatch)
+    with opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.result == "refused_unverifiable" and r.step is locks.Step.M_IDENTITY
+        assert free(with_m) and free(with_m / M)
+    assert is_closed(spy.fds[0])
+
+
+def test_the_m_lock_lasts_for_the_whole_held_lifetime_and_release_frees_both(with_m):
+    with opened(with_m) as sfd:
+        held = locks.acquire_exclusive(with_m, sfd)
+        mfd = held.m_fd
+        with holder():  # time passes in another process; the lock does not depend on this call
+            assert not free(with_m / M, fcntl.LOCK_SH)
+        held.verify()
+        assert held.m_fd == mfd and not free(with_m / M, fcntl.LOCK_SH)
+        held.release()
+        assert is_closed(mfd) and held.m_fd is None
+        assert free(with_m) and free(with_m / M)
+        os.fstat(sfd)  # the caller's sets descriptor stays open
+
+
+def test_exclusive_and_writers_still_exclude_each_other_with_m_found_here(with_m):
+    from lpbfstudio import upgrade as up
+    with opened(with_m) as sfd, opened(with_m) as other:
+        with locks.acquire_exclusive(with_m, sfd):
+            r = refused(locks.acquire_writer, with_m, other)
+            assert r.busy and r.step is locks.Step.SETS_LOCK
+            r = refused(locks.acquire_exclusive, with_m, other)
+            assert r.busy and r.step is locks.Step.SETS_LOCK
+            with pytest.raises(up.LibraryBusy):
+                with up.library_lock(with_m):
+                    pass
+        with locks.acquire_writer(with_m, sfd):
+            assert refused(locks.acquire_exclusive, with_m, other).busy
+        with locks.acquire_exclusive(with_m, sfd):
+            pass
+
+
+@pytest.mark.parametrize("err", CONTENTION + LOCK_ERRORS)
+def test_a_lock_failure_on_a_found_m_follows_d1_and_releases_the_sets_lock(with_m, monkeypatch, err):
+    real_open = locks._open_at
+
+    def spy(d, n, f):
+        fd = real_open(d, n, f)
+        rec.fail_fd = fd
+        return fd
+    rec = Recorder(monkeypatch, err=err)
+    monkeypatch.setattr(locks, "_open_at", spy)
+    with opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.busy is (err in CONTENTION) and r.step is locks.Step.M_LOCK and r.errno == err
+        assert len(rec.locks_taken()) == 2 and free(with_m) and free(with_m / M)
+        assert is_closed(rec.fail_fd)
+
+
+def test_a_descriptor_the_caller_passes_is_the_one_locked_and_is_never_closed(with_m, monkeypatch):
+    # plan revision 4.7 state machine sections 3.1 to 3.3: restore locks its own M_fd, and the frozen
+    # survey then repeats the flock on that same open file description
+    spy = Spy(monkeypatch)
+    with opened(with_m) as sfd, opened(with_m / M) as mfd:
+        with locks.acquire_exclusive(with_m, sfd, mfd) as held:
+            assert held.m_fd == mfd and spy.fds == []
+            fcntl.flock(mfd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # same description: succeeds
+            assert not free(with_m / M)  # a new description is refused: why this path stays
+        os.fstat(mfd)
+
+
+def test_no_descriptor_leaks_when_exclusive_finds_m(with_m):
+    def count():
+        return len(os.listdir("/proc/self/fd"))
+    with opened(with_m) as sfd:
+        start = count()
+        with locks.acquire_exclusive(with_m, sfd):
+            assert count() == start + 1
+        assert count() == start
+        with holder((with_m / M, "ex")):
+            inside = count()
+            for _ in range(5):
+                refused(locks.acquire_exclusive, with_m, sfd)
+            assert count() == inside
+
+
+# ================================================================ correction round: close failures
+
+
+class BadClose:
+    """Closes for real, so nothing leaks, then reports the failure a close can report."""
+
+    def __init__(self, monkeypatch, err=errno.EIO):
+        self.err, self.real, self.calls = err, locks._close, []
+        monkeypatch.setattr(locks, "_close", self)
+
+    def __call__(self, fd):
+        self.calls.append(fd)
+        self.real(fd)
+        raise OSError(self.err, "close failed")
+
+
+def test_open_m_keeps_its_refusal_when_closing_its_descriptor_fails(with_m, monkeypatch):
+    spy = Spy(monkeypatch)
+    real_fstat = locks._fstat
+
+    def fstat(fd):
+        if fd in spy.fds:
+            raise OSError(errno.EIO, "fstat failed")
+        return real_fstat(fd)
+    monkeypatch.setattr(locks, "_fstat", fstat)
+    bad = BadClose(monkeypatch, errno.EBADF)
+    with opened(with_m) as sfd:
+        for fn in (locks.acquire_writer, locks.acquire_exclusive):
+            r = refused(fn, with_m, sfd)
+            assert r.refusal is locks.Refusal.UNVERIFIABLE and r.step is locks.Step.M_OPEN
+            assert r.errno == errno.EIO  # the primary error, not the close error
+            assert r.close_errno == errno.EBADF
+            assert free(with_m)
+    assert bad.calls == spy.fds
+
+
+@pytest.mark.parametrize("fn", ["acquire_writer", "acquire_exclusive"])
+def test_take_m_keeps_busy_when_closing_its_descriptor_fails(with_m, monkeypatch, fn):
+    bad = BadClose(monkeypatch)
+    with holder((with_m / M, "ex")), opened(with_m) as sfd:
+        r = refused(getattr(locks, fn), with_m, sfd)
+        assert r.refusal is locks.Refusal.BUSY and r.result == "refused_busy"
+        assert r.step is locks.Step.M_LOCK and r.errno in CONTENTION
+        assert r.close_errno == errno.EIO
+        assert free(with_m) and len(bad.calls) == 1
+
+
+def test_take_m_keeps_an_identity_refusal_when_closing_its_descriptor_fails(with_m, monkeypatch):
+    monkeypatch.setattr(locks, "_lstat_at", lambda d, n: os.stat(with_m / "A.json"))
+    BadClose(monkeypatch)
+    with opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.refusal is locks.Refusal.UNVERIFIABLE and r.step is locks.Step.M_IDENTITY
+        assert r.errno is None and r.close_errno == errno.EIO
+        assert free(with_m) and free(with_m / M)
+
+
+def test_recheck_keeps_its_refusal_when_closing_its_descriptor_fails(sets, monkeypatch):
+    with opened(sets) as sfd, locks.acquire_writer(sets, sfd) as held:
+        (sets / M).mkdir()
+        BadClose(monkeypatch)
+        with holder((sets / M, "ex")):
+            r = refused(held.recheck_m)
+            assert r.busy and r.close_errno == errno.EIO and held.m_fd is None
+        monkeypatch.undo()
+
+
+def test_an_interrupt_stays_primary_when_closing_fails(with_m, monkeypatch):
+    real_open = locks._open_at
+
+    def spy(d, n, f):
+        fd = real_open(d, n, f)
+        rec.fail_fd = fd
+        return fd
+    rec = Recorder(monkeypatch, exc=KeyboardInterrupt())
+    monkeypatch.setattr(locks, "_open_at", spy)
+    BadClose(monkeypatch)
+    with opened(with_m) as sfd:
+        with pytest.raises(KeyboardInterrupt) as info:
+            locks.acquire_exclusive(with_m, sfd)
+        assert info.value.close_errno == errno.EIO
+        assert free(with_m) and free(with_m / M)
+
+
+def test_a_refusal_with_a_clean_close_has_no_close_error(with_m):
+    with holder((with_m / M, "ex")), opened(with_m) as sfd:
+        r = refused(locks.acquire_exclusive, with_m, sfd)
+        assert r.busy and r.close_errno is None
+
+
+def test_a_close_failure_on_release_is_reported_and_is_not_a_refusal(with_m, monkeypatch):
+    with opened(with_m) as sfd:
+        held = locks.acquire_exclusive(with_m, sfd)
+        BadClose(monkeypatch)
+        with pytest.raises(OSError) as info:
+            held.release()
+        assert not isinstance(info.value, locks.LockRefused) and info.value.errno == errno.EIO
+        assert held.released and held.m_fd is None
+        assert free(with_m) and free(with_m / M)  # the sets lock was released all the same
+        held.release()  # idempotent: reported once
+
+
+def test_a_close_failure_leaving_a_clean_with_block_is_raised(with_m, monkeypatch):
+    with opened(with_m) as sfd:
+        with pytest.raises(OSError) as info:
+            with locks.acquire_exclusive(with_m, sfd):
+                BadClose(monkeypatch)
+        assert info.value.errno == errno.EIO and free(with_m)
+
+
+def test_a_close_failure_never_replaces_the_exception_leaving_a_with_block(with_m, monkeypatch):
+    with opened(with_m) as sfd:
+        with pytest.raises(RuntimeError) as info:
+            with locks.acquire_exclusive(with_m, sfd):
+                BadClose(monkeypatch)
+                raise RuntimeError("boom")
+        assert info.value.close_errno == errno.EIO and free(with_m)
+
+
+# ================================================================ correction round: lifecycle
+
+
+def test_an_unlock_failure_on_the_callers_descriptor_is_reported_and_the_lock_stays(sets, monkeypatch):
+    # the module cannot close a caller's descriptor: the lock lasts until the caller closes it
+    sfd = os.open(sets, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        held = locks.acquire_exclusive(sets, sfd)
+        real = locks._flock
+
+        def bad(fd, op):
+            if op & fcntl.LOCK_UN:
+                raise OSError(errno.EIO, "unlock failed")
+            return real(fd, op)
+        monkeypatch.setattr(locks, "_flock", bad)
+        held.release()
+        assert held.released and held.unlock_error.errno == errno.EIO
+        assert not free(sets)
+    finally:
+        os.close(sfd)
+    assert free(sets)
+
+
+def test_a_clean_release_reports_no_unlock_error(with_m):
+    with opened(with_m) as sfd:
+        held = locks.acquire_exclusive(with_m, sfd)
+        held.release()
+        assert held.unlock_error is None
+
+
+@pytest.mark.parametrize("where", ["sets", "m"])
+@pytest.mark.parametrize("own", [True, False])
+def test_an_interrupt_right_after_a_granted_lock_leaves_nothing_held(with_m, monkeypatch, where, own):
+    # the real lock IS granted, and only then the interrupt arrives
+    real = locks._flock
+    state = {}
+
+    def granted_then_interrupted(fd, op):
+        real(fd, op)
+        if not op & fcntl.LOCK_UN and fd == state.get("target"):
+            state["target"] = None
+            raise KeyboardInterrupt()
+    monkeypatch.setattr(locks, "_flock", granted_then_interrupted)
+    real_open = locks._open_at
+
+    def spy(d, n, f):
+        fd = real_open(d, n, f)
+        if where == "m":
+            state["target"] = fd
+        return fd
+    monkeypatch.setattr(locks, "_open_at", spy)
+    with opened(with_m) as sfd, opened(with_m / M) as mfd:
+        if where == "sets":
+            state["target"] = sfd
+        elif not own:
+            state["target"] = mfd
+        with pytest.raises(KeyboardInterrupt):
+            locks.acquire_exclusive(with_m, sfd, None if own else mfd)
+        assert state["target"] is None  # the interrupt really fired after the grant
+        assert free(with_m) and free(with_m / M)
+
+
+def test_a_refused_sets_request_does_not_unlock_the_callers_descriptor(sets, monkeypatch):
+    rec = Recorder(monkeypatch)
+    with holder((sets, "ex")), opened(sets) as sfd:
+        assert refused(locks.acquire_exclusive, sets, sfd).busy
+    assert [c for c in rec.calls if c[1] & fcntl.LOCK_UN] == []

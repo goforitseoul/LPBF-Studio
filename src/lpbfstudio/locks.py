@@ -17,9 +17,13 @@ The lock objects (L-A, D-2.4):
 Who takes what:
 
 * ``acquire_exclusive`` (upgrade, report, apply, restore): an exclusive lock on the sets folder,
-  its path identity, then, when an M descriptor is given, an exclusive lock on M and its identity
-  (R2 steps 1 to 4). An operation that creates M does so while holding the sets lock and then calls
-  ``Held.lock_m``.
+  its path identity, then, **whenever M exists**, an exclusive lock on M and its identity (R2 steps
+  1 to 4). The module finds and opens M itself, so leaving out a descriptor can never skip the M
+  lock. A caller that already opened M passes that descriptor instead: restore must, because the
+  frozen survey repeats its ``flock`` on the descriptor cached in ``ctx.dirs`` (plan revision 4.7
+  state machine sections 3.1 to 3.3), and a second open file description would be busy against the
+  run's own lock. An operation that creates M does so while holding the sets lock and then calls
+  ``Held.lock_m``; that is the only reason for a later M lock.
 * ``acquire_writer`` (normal set writers): a shared lock on the sets folder, its path identity,
   then, if M exists, a shared lock on M and its identity (revision 5 section 2.2 steps 1 and 2).
   ``Held.recheck_m`` is step 3: just before the final replace, a writer that found no M checks
@@ -41,6 +45,24 @@ Classification (D-1), by errno and never by exception type:
 Contention is never reported as unverifiable, and an unverifiable state is never reported as busy.
 A refusal releases every lock the call itself took and closes every descriptor it opened; the
 caller's descriptors are never closed here.
+
+Cleanup never replaces the outcome. A close that fails while an exception is on its way out is
+recorded as ``close_errno`` on that exception, which stays the primary result. A close that fails
+with nothing else going wrong (``Held.release``) is raised as the ``OSError`` it is, after every
+lock has been dealt with; it is not a refusal.
+
+Lifecycle, for the caller:
+
+* ``Held.released`` means release was carried out, not that every lock is gone. If ``LOCK_UN``
+  fails, ``Held.unlock_error`` holds the error. A descriptor this module opened is closed anyway,
+  which frees its lock; a **caller's** descriptor cannot be closed here, so its lock lasts until
+  the caller closes that descriptor. Callers therefore close their descriptors after release, in
+  every case.
+* An interrupt that arrives after ``flock`` has granted a lock is cleaned up by the acquiring call.
+  One window cannot be closed from here: an interrupt after the acquiring call has finished its
+  work and before the caller has received ``Held``. The caller then has no ``Held`` to release, and
+  closing its sets descriptor (or ending the process) frees the sets lock; a descriptor this module
+  opened for M stays open, and its lock held, until the process ends.
 
 Limits, stated: the identity check after locking detects a swapped folder; it cannot stop a
 program that ignores the locks, and path-based writers keep the D-2.6 window between this check
@@ -107,6 +129,7 @@ class LockRefused(Exception):
         self.step = step
         self.errno = err
         self.detail = detail
+        self.close_errno: int | None = None  # a close that also failed; this refusal stays primary
 
     @property
     def result(self) -> str:
@@ -176,6 +199,14 @@ def _close(fd: int) -> None:
     os.close(fd)
 
 
+def _close_during(exc: BaseException, fd: int) -> None:
+    """Close ``fd`` while ``exc`` propagates: a failure is recorded on ``exc``, never replaces it."""
+    try:
+        _close(fd)
+    except OSError as close_exc:
+        exc.close_errno = close_exc.errno
+
+
 def _dir_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC
 
@@ -224,11 +255,13 @@ def _lock(fd: int, mode: Mode, step: Step, what: str) -> None:
         raise LockRefused(kind, step, exc.errno, detail) from None
 
 
-def _unlock(fd: int) -> None:
+def _unlock(fd: int) -> OSError | None:
+    """Best effort; the error, if any. Only closing the descriptor (or process exit) then frees it."""
     try:
         _flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass  # best effort; closing the descriptor (or process exit) releases it in any case
+    except OSError as exc:
+        return exc
+    return None
 
 
 def _check_sets_identity(sets_path, sets_fd: int) -> None:
@@ -266,8 +299,8 @@ def _open_m(sets_fd: int) -> int | None:
                           f"the migration folder cannot be opened as a folder: {_text(exc)}") from None
     try:
         _check_folder(fd, Step.M_OPEN, "migration folder")
-    except BaseException:
-        _close(fd)
+    except BaseException as exc:
+        _close_during(exc, fd)
         raise
     return fd
 
@@ -286,34 +319,44 @@ class Held:
         self._owns_m = False
         self._sets_locked = False
         self.released = False
+        self.unlock_error: OSError | None = None  # a failed LOCK_UN: see the module's lifecycle notes
 
     def __enter__(self) -> Held:
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.release()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc is None:
+            self.release()
+        else:
+            self._release_during(exc)
+
+    def _release_during(self, exc: BaseException) -> None:
+        """``release`` while ``exc`` propagates: a close failure is recorded on it, not raised."""
+        try:
+            self.release()
+        except OSError as close_exc:
+            exc.close_errno = close_exc.errno
 
     def _take_m(self, m_fd: int, owned: bool) -> None:
         """Lock ``m_fd`` in this holder's mode and check its identity; on refusal leave M unheld."""
         try:
             _check_folder(m_fd, Step.M_OPEN, "migration folder")
             _lock(m_fd, self.mode, Step.M_LOCK, "migration folder")
-        except BaseException:
-            if owned:
-                _close(m_fd)
-            raise
-        try:
             _check_m_identity(self.sets_fd, m_fd)
-        except BaseException:
-            _unlock(m_fd)
+            self.m_fd = m_fd
+            self._owns_m = owned
+        except BaseException as exc:
+            self.m_fd = None
+            # a refused request took nothing; anything else (an interrupt too) may hold the lock
+            if not (isinstance(exc, LockRefused) and exc.step in (Step.M_OPEN, Step.M_LOCK)):
+                _unlock(m_fd)
             if owned:
-                _close(m_fd)
+                _close_during(exc, m_fd)
             raise
-        self.m_fd = m_fd
-        self._owns_m = owned
 
     def lock_m(self, m_fd: int) -> None:
-        """Exclusive holders only: lock M (for example one just created under the sets lock)."""
+        """Exclusive holders only: lock an M created under the sets lock, after ``acquire_exclusive``
+        found none (revision 3 section 2.2). An M that already exists is locked at acquisition."""
         if self.released or self.mode is not Mode.EXCLUSIVE or self.m_fd is not None:
             raise ValueError("lock_m needs an exclusive holder that does not yet hold M")
         self._take_m(m_fd, owned=False)
@@ -351,49 +394,72 @@ class Held:
             _check_m_identity(self.sets_fd, self.m_fd)
 
     def release(self) -> None:
-        """Release M, then the sets folder; close M if this module opened it. Idempotent."""
+        """Release M, then the sets folder; close M if this module opened it. Idempotent.
+
+        A failed ``LOCK_UN`` is kept in ``unlock_error``. A failed close is raised, once, after the
+        sets folder has been dealt with. The caller closes its own descriptors after this, in every
+        case: until then a lock whose ``LOCK_UN`` failed may still be held."""
         if self.released:
             return
         self.released = True
+        close_error = None
         m_fd, self.m_fd = self.m_fd, None
         if m_fd is not None:
-            _unlock(m_fd)
+            self.unlock_error = _unlock(m_fd)
             if self._owns_m:
                 try:
                     _close(m_fd)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    close_error = exc
         if self._sets_locked:
             self._sets_locked = False
-            _unlock(self.sets_fd)
+            self.unlock_error = _unlock(self.sets_fd) or self.unlock_error
+        if close_error is not None:
+            raise close_error
 
 
 def _acquire(mode: Mode, sets_path, sets_fd: int) -> Held:
     _require_platform()
     _check_folder(sets_fd, Step.SETS_FOLDER, "sets folder")
     held = Held(mode, sets_path, sets_fd)
-    _lock(sets_fd, mode, Step.SETS_LOCK, "library folder")
-    held._sets_locked = True
     try:
+        held._sets_locked = True  # before the request: an interrupt just after the grant is cleaned up
+        _lock(sets_fd, mode, Step.SETS_LOCK, "library folder")
         _check_sets_identity(sets_path, sets_fd)
-    except BaseException:
-        held.release()
+    except BaseException as exc:
+        if isinstance(exc, LockRefused) and exc.step is Step.SETS_LOCK:
+            held._sets_locked = False  # a refused request took nothing, so there is nothing to unlock
+        held._release_during(exc)
         raise
     return held
+
+
+def _take_existing_m(held: Held) -> None:
+    fd = _open_m(held.sets_fd)
+    if fd is not None:
+        held._take_m(fd, owned=True)
 
 
 def acquire_exclusive(sets_path, sets_fd: int, m_fd: int | None = None) -> Held:
     """Exclusive operations (R2): the sets lock, its identity, then the M lock and its identity.
 
-    ``sets_fd`` is the caller's descriptor of the folder at ``sets_path``; ``m_fd``, if given, the
-    caller's descriptor of M opened from it. Neither is ever closed here."""
+    ``sets_fd`` is the caller's descriptor of the folder at ``sets_path``. ``m_fd`` is never a
+    statement that M is absent. ``None`` means this module finds M: if M exists it is opened (never
+    through a link), locked, identified and held in ``Held.m_fd`` until release, which closes it;
+    if M does not exist the holder has the sets lock only, and M is not created. An ``m_fd`` given
+    is the caller's own descriptor of M, for a caller whose later steps must lock that same open
+    file description (restore). It is locked and identified the same way. The caller's descriptors
+    are never closed here. M that exists but cannot be opened, locked or identified refuses, and
+    nothing stays held."""
     held = _acquire(Mode.EXCLUSIVE, sets_path, sets_fd)
-    if m_fd is not None:
-        try:
+    try:
+        if m_fd is None:
+            _take_existing_m(held)
+        else:
             held._take_m(m_fd, owned=False)
-        except BaseException:
-            held.release()
-            raise
+    except BaseException as exc:
+        held._release_during(exc)
+        raise
     return held
 
 
@@ -402,10 +468,8 @@ def acquire_writer(sets_path, sets_fd: int) -> Held:
     lock and its identity. M is opened here (and closed on release) and never created."""
     held = _acquire(Mode.SHARED, sets_path, sets_fd)
     try:
-        fd = _open_m(sets_fd)
-        if fd is not None:
-            held._take_m(fd, owned=True)
-    except BaseException:
-        held.release()
+        _take_existing_m(held)
+    except BaseException as exc:
+        held._release_during(exc)
         raise
     return held
