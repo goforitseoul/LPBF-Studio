@@ -1,5 +1,22 @@
 # Release notes
 
+## Unreleased: delete re-check (B2b, 2026-11-07)
+
+**Changes**
+- Deleting a set checks the library locks again immediately before the file is removed. If an
+  upgrade, report, apply or restore has started meanwhile, or the library folder has changed, the
+  delete is refused and the set stays. The editor shows the refusal under "Not deleted"; the CLI
+  exits 1.
+
+**Unchanged, now documented**
+- Renaming a set does not check again before it removes the old name, and nothing is rolled back.
+  The operating restriction for older builds below covers this.
+- In the rare case that closing a lock descriptor fails after a save, copy, rename, import or
+  delete has succeeded, the error is reported as an `OSError` although the change was made. Read
+  the set again to see its state.
+
+Details: `docs/file_format.md`, "Changes in B2b".
+
 ## Unreleased: library locks (B2a)
 
 **Changes**

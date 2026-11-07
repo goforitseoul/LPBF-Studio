@@ -8,8 +8,13 @@ machine files are outside the sets folder and take none.
 
 The migration folder is checked again just before each ``os.replace``: the one replace of ``save``,
 ``copy``, ``import_file`` and of ``rename``'s new name, and every replace of ``ensure_defaults``,
-which stops at the first refusal and keeps the complete defaults already replaced. There is no such
-check before ``delete``'s unlink or before ``rename`` removes the old name.
+which stops at the first refusal and keeps the complete defaults already replaced. ``delete`` makes
+the same check immediately before its unlink (rev 5 section 2.2 step 3a, B2b) and, if it refuses,
+removes nothing. There is no check before ``rename`` removes the old name, and no rollback there.
+
+A close that fails while a writer's locks are released after a successful write reaches the caller
+as that ``OSError``: the write is done, and it is not a refusal. A failed write keeps its own error,
+with the close failure recorded on it as ``close_errno``.
 
 **Platform rule.** Where ``fcntl.flock`` does not exist (Windows), the set writers stay unlocked, by
 this explicit rule: no upgrade, report, apply or restore can run there, so a save races none of them.
@@ -492,6 +497,9 @@ class Library:
                 raise LibraryError(f"no exposure set named {name!r}")
             if self._read(f).locked:
                 raise LibraryError(f"{name!r} is locked and cannot be deleted")
+            check = _FINAL_CHECK.get()
+            if check is not None:
+                check()  # rev5 §2.2 step 3a (B2b supplement, 2026-11-07): immediately before the unlink
             f.unlink()
 
     def unique_name(self, base: str) -> str:

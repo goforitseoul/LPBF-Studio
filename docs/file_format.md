@@ -184,9 +184,33 @@ Upgrade, report and apply are refused there, as before.
   reported success. The save's content was lost: it was in neither the set file nor the backup.
   This is not fixed. It is the reason for the restriction above.
 
-**Smaller known windows.** `delete`, and the removal of the old name in `rename`, are not re-checked
-just before they change the folder. An older upgrade that creates the migration folder in that
-instant is not noticed. This falls under the same restriction.
+**Smaller known windows.** As of B2a, `delete`, and the removal of the old name in `rename`, were
+not re-checked just before they changed the folder. B2b (below) closes this for `delete` only. The
+`rename` window remains and falls under the same restriction.
+
+### Changes in B2b (2026-11-07)
+
+- **`delete` re-checks before it removes the file.** Immediately before the unlink, `delete` checks
+  the migration folder and both folder identities again, the same check as before a replace (a
+  supplement to rev 5 §2.2 step 3, "step 3a"). If the migration folder has appeared and cannot be
+  locked, or either folder is no longer the one that was locked, `delete` refuses, the set file stays
+  as it was, and nothing else is changed. The message is the same as for an abandoned save: "an
+  upgrade started while saving; nothing was saved"; the editor shows it under "Not deleted". Like
+  step 3, this narrows the uncoordinated case with an older upgrade; it does not close it.
+- **`rename`: the old name's removal is not re-checked, and there is no rollback.** `rename` writes
+  the new name first (re-checked just before that replace, as before), then removes the old name
+  with no further check. An older upgrade that creates the migration folder between those two steps
+  is not noticed, and the old name is removed anyway. B2b does not add a check or a rollback here;
+  refusing at that point would leave both names on disk. This is unchanged and falls under the
+  operating restriction above.
+- **A close failure after a successful write.** When a writer releases its locks, closing its
+  descriptor of the migration folder can fail (for example with `EIO`). If the write itself
+  succeeded, that close error reaches the caller as an `OSError`, not as a refusal: **the save,
+  copy, rename, import or delete has already happened**, and the locks have been released. Callers,
+  scripts included, must not treat that `OSError` as "nothing was saved"; read the set again to see
+  its state. If the write itself failed, the caller gets the write's own error, and the close failure
+  is only recorded on it (`close_errno`). The CLI and the editor do not catch this rare error. This
+  behaviour is unchanged from B2a and is pinned by tests.
 
 ## Out of scope
 
