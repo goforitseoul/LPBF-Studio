@@ -1,15 +1,41 @@
-"""Folder-backed exposure-set library (one JSON file per set)."""
+"""Folder-backed exposure-set library (one JSON file per set).
+
+The set writers (``save``, ``copy``, ``rename``, ``delete``, ``import_file``, ``ensure_defaults``)
+take the writer locks: a shared lock on the sets folder, then a shared lock on the
+migration folder if it exists, held for the whole read-check-write sequence. A writer that cannot
+take them refuses with ``LibraryLocked`` and writes nothing. Reading takes no lock. Process and
+machine files are outside the sets folder and take none.
+
+The migration folder is checked again just before each ``os.replace``: the one replace of ``save``,
+``copy``, ``import_file`` and of ``rename``'s new name, and every replace of ``ensure_defaults``,
+which stops at the first refusal and keeps the complete defaults already replaced. There is no such
+check before ``delete``'s unlink or before ``rename`` removes the old name.
+
+**Platform rule.** Where ``fcntl.flock`` does not exist (Windows), the set writers stay unlocked, by
+this explicit rule: no upgrade, report, apply or restore can run there, so a save races none of them.
+Two processes saving at once are not coordinated there. Everywhere else every failure refuses: a
+file system that cannot lock never falls back to an unlocked write.
+"""
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import errno
 import json
 import os
 import re
 import tempfile
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # Windows: the platform rule above
+    fcntl = None  # type: ignore[assignment]
+
 from .defaults import default_sets
+from .locks import RESULT, Held, LockRefused, Refusal, Step, acquire_writer, open_sets
 from .models import (
     ExposureSet, FileFormatError, MachineProfile, PassIdError, ProcessSettings, check_schema_version,
     identity_problem, pass_id_problem,
@@ -21,6 +47,45 @@ ENV_VAR = "LPBF_LIBRARY"
 
 class LibraryError(Exception):
     pass
+
+
+class LibraryLocked(LibraryError):
+    """A set writer was refused by the library locks; nothing was saved. ``refusal`` and ``result``
+    are the D-1 classification."""
+
+    def __init__(self, message: str, refusal: Refusal) -> None:
+        super().__init__(message)
+        self.refusal = refusal
+
+    @property
+    def result(self) -> str:
+        return RESULT[self.refusal]
+
+
+_BUSY_TEXT = "an upgrade, report, apply or restore is in progress for this library; nothing was saved"
+_CANNOT_LOCK_TEXT = "this library's file system cannot lock; nothing was saved"
+_ABANDONED_TEXT = "an upgrade started while saving; nothing was saved"
+_CANNOT_LOCK_ERRNOS = frozenset({errno.ENOLCK, errno.EOPNOTSUPP, errno.EINVAL})
+
+# The re-check of the writer that is running, called just before its final change.
+_FINAL_CHECK: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "lpbf_library_final_check", default=None)
+
+
+def _flock_exists() -> bool:
+    """Whether this platform has ``flock`` at all. False selects the platform rule above; it is the
+    only condition that does, so a lock failure where ``flock`` exists can never select it."""
+    return fcntl is not None and hasattr(fcntl, "flock")
+
+
+def _refusal(exc: LockRefused) -> LibraryLocked:
+    if exc.refusal is Refusal.BUSY:
+        text = _BUSY_TEXT
+    elif exc.errno in _CANNOT_LOCK_ERRNOS and exc.step in (Step.SETS_LOCK, Step.M_LOCK):
+        text = _CANNOT_LOCK_TEXT
+    else:
+        text = f"{exc.detail}; nothing was saved"
+    return LibraryLocked(text, exc.refusal)
 
 
 def default_library_path() -> Path:
@@ -46,18 +111,80 @@ def _tmp_prefix(path: Path) -> str:
 
 def _atomic_write(path: Path, text: str) -> None:
     """Write via a temporary file in the same folder and ``os.replace``, so a failed write
-    never leaves a truncated file behind."""
+    never leaves a truncated file behind. A locked writer's re-check runs just before the replace;
+    if it refuses, only this write's own temporary file is removed, identified by its inode."""
     fd, tmp = tempfile.mkstemp(prefix=_tmp_prefix(path), suffix=_TMP_SUFFIX, dir=path.parent)
+    check = _FINAL_CHECK.get()
+    own = os.fstat(fd) if check is not None else None
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        if check is not None:
+            check()
         os.replace(tmp, path)
+    except LibraryLocked as exc:
+        left = _remove_own(tmp, own)
+        if left:
+            exc.args = (f"{exc}; {left}",)
+        raise
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _atomic_write_all(items: list[tuple[Path, str]]) -> None:
+    """Several new files, all staged first. A locked writer re-checks once after staging and again
+    just before every replace. A refusal before the first replace leaves none of them created; a
+    later one stops the batch and keeps the complete files already replaced (no rollback). Either
+    way only this batch's own remaining temporary files are removed."""
+    staged: list[tuple[str, os.stat_result, Path]] = []
+    check = _FINAL_CHECK.get()
+    created = 0
+    try:
+        for path, text in items:
+            fd, tmp = tempfile.mkstemp(prefix=_tmp_prefix(path), suffix=_TMP_SUFFIX, dir=path.parent)
+            staged.append((tmp, os.fstat(fd), path))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+        if check is not None:
+            check()
+        while staged:
+            tmp, _, path = staged[0]
+            if check is not None:
+                check()  # rev5 §2.2 step 3, before each replace (B2a follow-up of 2026-11-07)
+            os.replace(tmp, path)
+            staged.pop(0)
+            created += 1
+    except LibraryLocked as exc:
+        left = [text for text in (_remove_own(tmp, own) for tmp, own, _ in staged) if text]
+        if created:
+            left.append(f"{created} of {len(items)} files were already complete and stay in place")
+        if left:
+            exc.args = ("; ".join([str(exc), *left]),)
+        raise
+    except BaseException:
+        for tmp, _, _ in staged:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        raise
+
+
+def _remove_own(tmp: str, own: os.stat_result) -> str | None:
+    """Remove ``tmp`` if it is still the file ``own`` describes; what stays on disk, or None."""
+    name = os.path.basename(tmp)
+    try:
+        st = os.lstat(tmp)
+        if (st.st_dev, st.st_ino) != (own.st_dev, own.st_ino):
+            return f"{name} is no longer this save's temporary file and was left in place"
+        os.unlink(tmp)
+    except OSError as exc:
+        return f"its temporary file {name} could not be removed ({exc.strerror or exc})"
+    return None
 
 
 def _pathconf(folder: Path, key: str) -> int | None:
@@ -115,6 +242,16 @@ def _parse_set(text: str) -> ExposureSet:
     return ExposureSet.model_validate_json(text)
 
 
+def _final_check(held: Held) -> None:
+    """Revision 5 section 2.2 step 3: M may have appeared since the locks were taken, and the folders
+    must still be the locked ones. Any refusal abandons the write."""
+    try:
+        held.recheck_m()
+        held.verify()
+    except LockRefused as exc:
+        raise LibraryLocked(_ABANDONED_TEXT, exc.refusal) from exc
+
+
 class Library:
     def __init__(self, root: Path | str | None = None, seed: bool = True) -> None:
         self.root = Path(root) if root else default_library_path()
@@ -125,7 +262,11 @@ class Library:
         self.machine_errors: list[tuple[Path, str]] = []
         self.unreadable_machines: list[str] = []
         if seed:
-            self.ensure_defaults()
+            try:
+                self.ensure_defaults()
+            except LibraryLocked as exc:
+                if exc.refusal is not Refusal.BUSY:
+                    raise  # only contention skips seeding: reading must go on during an upgrade
             self.ensure_default_machine()
 
     # ------------------------------------------------------------------ sets
@@ -134,6 +275,27 @@ class Library:
     # ("My Part" and "My_Part"), and a file can hold a name that does not match its file
     # name (manual edits). Every write therefore checks which set actually owns the target
     # file and refuses to replace a different set.
+
+    @contextlib.contextmanager
+    def _writer_locks(self) -> Iterator[None]:
+        """Hold the writer locks for one read-check-write sequence, or refuse before it starts."""
+        if not _flock_exists():  # the platform rule in the module docstring
+            yield
+            return
+        try:
+            sets_fd = open_sets(self.sets_dir)
+            try:
+                with acquire_writer(self.sets_dir, sets_fd) as held:
+                    token = _FINAL_CHECK.set(lambda: _final_check(held))
+                    try:
+                        yield
+                    finally:
+                        _FINAL_CHECK.reset(token)
+            finally:
+                with contextlib.suppress(OSError):  # never replaces the writer's own outcome
+                    os.close(sets_fd)  # also frees the sets lock if its LOCK_UN failed
+        except LockRefused as exc:
+            raise _refusal(exc) from exc
 
     def _file(self, name: str) -> Path:
         return self.sets_dir / f"{_slug(name)}.json"
@@ -173,10 +335,12 @@ class Library:
             raise LibraryError(self._conflict(name, f))
 
     def ensure_defaults(self) -> None:
-        for es in default_sets():
-            f = self._file(es.name)
-            if not f.exists():
-                self._write(es, f)
+        sets = default_sets()
+        if all(self._file(es.name).exists() for es in sets):
+            return  # nothing to write, so no lock: a read-only start never waits on or meets one
+        with self._writer_locks():
+            _atomic_write_all([(self._file(es.name), self._text(es)) for es in sets
+                               if not self._file(es.name).exists()])
 
     def names(self) -> list[str]:
         return sorted(self.load_all(), key=str.lower)
@@ -253,6 +417,10 @@ class Library:
         raise LibraryError(f"no exposure set named {name!r}")
 
     def _write(self, es: ExposureSet, f: Path) -> None:
+        _atomic_write(f, self._text(es))
+
+    @staticmethod
+    def _text(es: ExposureSet) -> str:
         changed = identity_problem(es)  # read-only fields changed by bypassing validation
         if changed:
             raise LibraryError(f"{es.name!r} was not saved: {changed}")
@@ -263,64 +431,68 @@ class Library:
             errors = getattr(exc, "errors", None)
             reason = errors()[0]["msg"] if callable(errors) and errors() else str(exc).splitlines()[0]
             raise LibraryError(f"{es.name!r} was not saved: {reason}") from exc
-        _atomic_write(f, text)
+        return text
 
     def save(self, es: ExposureSet, overwrite: bool = True) -> None:
-        f = self._locate(es.name)
-        if f is not None:
-            current = self._read(f)
-            if current.locked:
-                raise LibraryError(f"{es.name!r} is locked; copy it to make changes")
-            if not overwrite:
-                raise LibraryError(f"{es.name!r} already exists")
-            if es.schema_version != current.schema_version:
-                raise LibraryError(
-                    f"{es.name!r} was not saved: its file is format {current.schema_version} and this set "
-                    f"is format {es.schema_version}; the file format changes only through an explicit upgrade")
-        else:
-            f = self._file(es.name)
-            if f.exists():
-                raise LibraryError(self._conflict(es.name, f))
-        self._write(es, f)
+        with self._writer_locks():
+            f = self._locate(es.name)
+            if f is not None:
+                current = self._read(f)
+                if current.locked:
+                    raise LibraryError(f"{es.name!r} is locked; copy it to make changes")
+                if not overwrite:
+                    raise LibraryError(f"{es.name!r} already exists")
+                if es.schema_version != current.schema_version:
+                    raise LibraryError(
+                        f"{es.name!r} was not saved: its file is format {current.schema_version} and this set "
+                        f"is format {es.schema_version}; the file format changes only through an explicit upgrade")
+            else:
+                f = self._file(es.name)
+                if f.exists():
+                    raise LibraryError(self._conflict(es.name, f))
+            self._write(es, f)
 
     def copy(self, source: str, new_name: str) -> ExposureSet:
-        self._check_free(new_name)
-        es = self.get(source).model_copy(deep=True)
-        es.name = new_name
-        es.locked = False
-        if es.description and not es.description.startswith("Copy of"):
-            es.description = f"Copy of {source}. {es.description}"
-        self._write(es, self._file(new_name))
-        return es
+        with self._writer_locks():
+            self._check_free(new_name)
+            es = self.get(source).model_copy(deep=True)
+            es.name = new_name
+            es.locked = False
+            if es.description and not es.description.startswith("Copy of"):
+                es.description = f"Copy of {source}. {es.description}"
+            self._write(es, self._file(new_name))
+            return es
 
     def rename(self, old: str, new: str) -> ExposureSet:
-        src = self._locate(old)
-        if src is None:
-            raise LibraryError(f"no exposure set named {old!r}")
-        es = self._read(src)
-        if es.locked:
-            raise LibraryError(f"{old!r} is locked")
-        if new == old:
-            raise LibraryError(f"{new!r} already exists")
-        self._check_free(new, ignore=src)
-        es.name = new
-        dst = self._file(new)
-        self._write(es, dst)
-        if dst != src:
-            try:
-                src.unlink()
-            except OSError as exc:
-                dst.unlink(missing_ok=True)
-                raise LibraryError(f"cannot rename {old!r}: {exc}") from exc
-        return es
+        with self._writer_locks():
+            src = self._locate(old)
+            if src is None:
+                raise LibraryError(f"no exposure set named {old!r}")
+            es = self._read(src)
+            if es.locked:
+                raise LibraryError(f"{old!r} is locked")
+            if new == old:
+                raise LibraryError(f"{new!r} already exists")
+            self._check_free(new, ignore=src)
+            es.name = new
+            dst = self._file(new)
+            self._write(es, dst)
+            if dst != src:
+                try:
+                    src.unlink()
+                except OSError as exc:
+                    dst.unlink(missing_ok=True)
+                    raise LibraryError(f"cannot rename {old!r}: {exc}") from exc
+            return es
 
     def delete(self, name: str) -> None:
-        f = self._locate(name)
-        if f is None:
-            raise LibraryError(f"no exposure set named {name!r}")
-        if self._read(f).locked:
-            raise LibraryError(f"{name!r} is locked and cannot be deleted")
-        f.unlink()
+        with self._writer_locks():
+            f = self._locate(name)
+            if f is None:
+                raise LibraryError(f"no exposure set named {name!r}")
+            if self._read(f).locked:
+                raise LibraryError(f"{name!r} is locked and cannot be deleted")
+            f.unlink()
 
     def unique_name(self, base: str) -> str:
         if not self.exists(base):

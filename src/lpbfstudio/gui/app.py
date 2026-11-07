@@ -343,7 +343,11 @@ class MainWindow(QMainWindow):
         name = self.current.name
         if QMessageBox.question(self, APP_NAME, f"Delete {name}? This cannot be undone.") != QMessageBox.StandardButton.Yes:
             return
-        self.lib.delete(name)
+        try:
+            self.lib.delete(name)
+        except LibraryError as exc:
+            QMessageBox.warning(self, APP_NAME, f"Not deleted:\n{exc}")
+            return
         self.current, self.dirty = None, False
         self.refresh_library()
         if self.library_list.count():

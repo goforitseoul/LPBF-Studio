@@ -64,6 +64,8 @@ Python 3.10+, pydantic v2 for the model and validation, click for the CLI, and P
   (the GUI tests offscreen). The upgrade and reconcile paths need POSIX primitives
   (`fcntl.flock`, directory file descriptors, `O_NOFOLLOW`) and are refused on Windows with an
   explicit result rather than a partial write. The tests for those paths skip on Windows.
+  Saving is not locked on Windows, because `fcntl.flock` does not exist there: two LPBF Studio
+  processes saving to one library at the same time are not coordinated. Run one at a time.
 - Not supported or claimed: network file systems, FUSE mounts and cloud-synchronised
   folders. A folder that cannot be locked is refused.
 - The upgrade lock is taken only by the upgrade and reconcile paths. Other editors, older

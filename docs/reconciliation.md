@@ -229,5 +229,17 @@ this outcome.
 - **S3-B2b follow-up 2 (LOW). An invalid `now`** (for example, earlier than the record's `created_at`) makes `apply_file`
   raise `RecordError` before anything is written.
 - **Windows is refused** for both the report and apply (G1).
+- **Older and newer builds on one library (B2a).** This build's set writers take shared locks on the
+  sets folder and, when it exists, the migration folder. Report and apply keep their
+  migration-folder lock only (OD-2): with the migration folder present they exclude this build's
+  writers; with it absent they write nothing (G2). Operating restriction:
+  - close every older LPBF Studio process that can write to the library before this build uses it;
+  - while this build uses the library, older builds must not save to it or upgrade it; read-only
+    commands, reports without apply included, may run alongside;
+  - **there is no full mutual exclusion between older and newer builds, and nothing enforces this.**
+    An older save is never coordinated. An older upgrade that finds no migration folder is not
+    coordinated with a save already under way in this build. In one tested order of that case,
+    both reported success and the save's content was lost (neither in the set file nor the
+    backup). This is not fixed. Details: `docs/file_format.md`, "Library locks and older builds".
 - **S3-B2c-a reads restore evidence only.** No Restore, no D-6 finalisation, no force, batch or
   automatic restore, and no CLI or GUI exist.

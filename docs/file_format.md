@@ -148,6 +148,46 @@ reason (unsupported version, invalid JSON, a duplicate name). Before B7 phase 1 
 skipped silently and the command could exit 0. `lpbf validate NAME` is unchanged apart from
 naming the reason when NAME's file is refused.
 
+## Library locks and older builds (B2a)
+
+**What this build does.** The set writers (`save`, `copy`, `rename`, `delete`, `import_file` and the
+seeding of the default sets) take a shared lock on the sets folder, then a shared lock on the
+migration folder `.format1-backup` if it exists. They hold both for the whole write. If they cannot
+take them, they refuse and write nothing, for example: "an upgrade, report, apply or restore is in
+progress for this library; nothing was saved". Just before each file replace they check the
+migration folder again: the single replace of a save, copy, import or of the new name in a rename,
+and each replace when default sets are seeded. If that check refuses while seeding, the defaults
+already written stay (each is complete), the others are not written, and the next start writes
+them. Reading a library (`list`, `show`, `validate`, opening it in the editor) takes no lock. An
+upgrade takes the exclusive sets-folder lock, and checks that the folder is still the same, before
+it creates or locks the migration folder. Report and apply keep their migration-folder lock only.
+Process settings and machine profiles are not locked.
+
+**Windows.** `fcntl.flock` does not exist there, so saves are not locked, by explicit rule. Two
+LPBF Studio processes writing to one library at the same time are not coordinated on Windows.
+Upgrade, report and apply are refused there, as before.
+
+**Older builds: operating restriction.**
+- Before this build is used on a library, close every older LPBF Studio process that can write to
+  it: CLI scripts, open editor windows, DOE runs.
+- While this build uses a library, older builds must not save to it or upgrade it. Older builds may
+  run read-only commands alongside it: `list`, `show`, `validate`, opening the library in the
+  editor, and reports without apply.
+- **There is no full mutual exclusion between older and newer builds, and nothing enforces this
+  restriction.** Older builds take no writer lock, so an older save is never coordinated with
+  anything. An older upgrade that finds no migration folder creates it and locks only that, so it
+  is not coordinated with a save already under way in this build. The pre-replace check narrows
+  that case; it does not close it.
+- **Observed data loss in that case.** One tested order: this build's save checked, found no
+  migration folder, and was then held just before its replace. An older upgrade read the set file
+  and was held. The save then completed and reported "saved". The upgrade then completed and
+  reported success. The save's content was lost: it was in neither the set file nor the backup.
+  This is not fixed. It is the reason for the restriction above.
+
+**Smaller known windows.** `delete`, and the removal of the old name in `rename`, are not re-checked
+just before they change the folder. An older upgrade that creates the migration folder in that
+instant is not noticed. This falls under the same restriction.
+
 ## Out of scope
 
 Upgrading format 1 sets to format 2 (S3), exporting a format 2 set as a format 1 copy (S4) and

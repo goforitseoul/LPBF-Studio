@@ -141,7 +141,10 @@ def set_values(ctx: click.Context, name: str, assignments: tuple[str, ...]) -> N
         es = with_assignments(es, pairs)  # all or nothing
     except (KeyError, ValueError) as exc:
         _fail(str(exc).splitlines()[0])
-    lib.save(es)
+    try:
+        lib.save(es)
+    except LibraryError as exc:
+        _fail(str(exc))
     click.echo(f"updated {name}")
 
 

@@ -381,12 +381,30 @@ def _digest_matches(a: bytes, b: bytes) -> bool:
     return _same(a, hashlib.sha256(b).hexdigest(), len(b))
 
 
+def _lock_sets_folder(ctx: _Ctx, base: Path) -> None:
+    """OD-1: the exclusive sets-folder lock and its path identity, taken before ``library_lock``
+    creates or locks the migration folder, so that a save in progress makes the upgrade busy before
+    anything is created. Held until the operation's context closes the descriptor."""
+    fd = ctx.dirs[base]
+    try:
+        _flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise LibraryBusy("another upgrade is using this library") from None
+    held, now = os.fstat(fd), os.stat(base)
+    if (held.st_dev, held.st_ino) != (now.st_dev, now.st_ino):
+        raise OSError("the library folder changed while it was being locked")
+
+
 @contextlib.contextmanager
 def library_lock(sets_dir: Path | str) -> Iterator[None]:
     """Hold the library's upgrade lock: an exclusive, non-blocking ``flock`` on a new descriptor of
     the migration folder (created if missing, never through a link). Raises LibraryBusy when
     another holder has it, OSError when the platform or file system cannot lock. Released on exit,
-    and by the OS if the process dies."""
+    and by the OS if the process dies.
+
+    This is the migration-folder lock only: it takes no sets-folder lock, and it can create the
+    migration folder. ``upgrade_file`` takes the sets-folder lock first (``_lock_sets_folder``); any
+    other production caller would have to do the same to keep OD-1's order."""
     problem = _platform_problem()
     if problem:
         raise OSError(f"upgrading is not supported on this platform: it {problem}")
@@ -629,6 +647,7 @@ def upgrade_file(sets_dir: Path | str, file_name: str, *, include_locked: bool =
                 return UpgradeOutcome(FileResult.FAILED, f"{problem}; nothing was written")
         lock = library_lock(base)
         try:
+            _lock_sets_folder(ctx, base)
             lock.__enter__()
         except LibraryBusy as exc:
             return UpgradeOutcome(FileResult.FAILED, f"{exc}; nothing was written", busy=True)
