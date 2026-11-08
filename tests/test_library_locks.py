@@ -1019,10 +1019,25 @@ def imports_of(path: Path, target: str) -> set:
     return found
 
 
-def test_library_py_is_the_only_application_module_that_imports_locks():
+# B3 (restore, 2026-11-07): the boundary gains exactly one caller, restore.py, which plan revision 4.7
+# section 1.1 requires to use locks.py (R2) and fsprim.py (every strict primitive). Its imports are pinned
+# as exactly as library.py's; library.py's own are unchanged.
+ALLOWED_FOR_RESTORE_FROM_LOCKS = {"LockRefused", "Refusal", "acquire_exclusive", "platform_problem"}
+ALLOWED_FOR_RESTORE_FROM_FSPRIM = {
+    "FsprimError", "Incomplete", "UnsupportedPlatform", "WriteIncomplete", "check_architecture", "complete_listing",
+    "complete_read", "exchange", "fd_mount_id", "identify_fs", "strict_fsync", "write_in_full", "_renameat2",
+    "_symbol",
+}
+
+
+def test_library_py_and_restore_py_are_the_only_application_modules_that_import_locks():
     callers = {p.relative_to(PACKAGE).as_posix() for p in modules()
                if p.name != "locks.py" and imports_of(p, "locks")}
-    assert callers == {"library.py"}
+    assert callers == {"library.py", "restore.py"}
+
+
+def test_restore_py_imports_only_the_exclusive_side_of_locks():
+    assert imports_of(PACKAGE / "restore.py", "locks") == ALLOWED_FOR_RESTORE_FROM_LOCKS
 
 
 def test_library_py_imports_only_the_writer_side_of_locks():
@@ -1037,8 +1052,9 @@ def test_no_application_module_reaches_locks_or_fsprim_dynamically():
                 assert name not in ("__import__", "importlib.import_module", "import_module"), (p, name)
 
 
-def test_no_application_module_imports_fsprim():
-    assert [p.name for p in modules() if p.name != "fsprim.py" and imports_of(p, "fsprim")] == []
+def test_restore_py_is_the_only_application_module_that_imports_fsprim():
+    assert [p.name for p in modules() if p.name != "fsprim.py" and imports_of(p, "fsprim")] == ["restore.py"]
+    assert imports_of(PACKAGE / "restore.py", "fsprim") == ALLOWED_FOR_RESTORE_FROM_FSPRIM
 
 
 def test_locks_imports_no_application_module():

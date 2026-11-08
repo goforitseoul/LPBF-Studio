@@ -116,11 +116,12 @@ def statfs(monkeypatch, magic, namelen=255):
 # --------------------------------------------------------------------------- isolation
 
 
-def test_no_module_of_the_application_uses_fsprim_yet():
+def test_restore_is_the_only_module_of_the_application_that_uses_fsprim():
+    # B3 (2026-11-07): restore.py is the caller plan revision 4.7 section 1.1 names; no other module may use it
     src = Path(fsprim.__file__).parent
     users = [p.name for p in src.rglob("*.py") if p.name != "fsprim.py"
              and re.search(r"\bfsprim\b", p.read_text(encoding="utf-8"))]
-    assert users == []
+    assert users == ["restore.py"]
 
 
 def test_fsprim_imports_no_application_module():
