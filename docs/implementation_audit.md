@@ -777,3 +777,27 @@ Format 1 outputs were compared with `a805f4f` using `docs/audit/b7p2_v1_outputs.
 `show`, `validate`, `compare`, `energy`, the JSON and CSV export, the DOE dry run and save, an
 unknown path and `rename`. Command output and written files are identical apart from the temporary
 folder names.
+
+## Criteria changes decided 2026-11-08
+
+These replace the criteria in section 8 from this date. The earlier text and the status sections above are kept as the record of their time.
+
+**B7 completion.** The format 1 export (S4) is tracked separately. Structural comparison (S5) is folded into E-AC3. B7 still has to account for the restore recovery decisions that remain open.
+
+**Milestone C.** C-AC3's summary panel covers data the model defines; qualification status is deferred until a qualification model is designed.
+
+**Milestone D** (folder-of-JSON history, DC-001):
+
+- D-AC1 and D-AC5 are removed (SQLite is not used).
+- D-AC2. Every save of a tracked or adoptable file creates an append-only revision with time and origin. History is listable (presentation is authorized separately).
+- D-AC3. Deferred. Lock and unlock need their own design; this is not implemented.
+- D-AC4. An untracked file is adopted on its first explicit write, with its exact bytes. Files in an anomaly state are never adopted. Adoption does not alter the file, and repeating the write creates no second object.
+- D-AC6. Stored JSON carries `schema_version`; a newer version is refused; an older format changes only through the explicit upgrade.
+- D-AC7. JSON import and export round trip preserves values and schema version. Provenance and qualification fields are deferred.
+
+**Milestone E.**
+
+- E-AC2 is replaced: a DOE save is not transactional. Each variant has its own outcome; variants already saved stay saved when a later one fails; every success and failure is reported; no atomicity or rollback is claimed.
+- E-AC3 includes the comparison scope that S5 described.
+
+**Milestone F.** `docs/calculations.md`, requested by B-AC8, does not exist yet. Writing and reviewing it is part of F-AC3; B-AC8 is not met until then.

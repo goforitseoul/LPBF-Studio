@@ -211,6 +211,19 @@ def test_final_exists_is_single_winner(lib):
     assert (out.status, out.reason) == (St.NOT_FINALIZED, "final_exists") and tree(job_dir(lib, jid)) == before
 
 
+def test_final_found_at_mkdir_loses_the_race_and_changes_nothing(lib, monkeypatch):
+    jid = ready(lib)
+
+    def other_writer(s):
+        if s == "J3.mkdir":
+            (job_dir(lib, jid) / "final").mkdir()
+            (job_dir(lib, jid) / "final/manifest.json").write_bytes(b"the winner")
+
+    monkeypatch.setattr(h, "_fault", other_writer)
+    assert j.finalize(lib, jid).reason == "final_exists"
+    assert (job_dir(lib, jid) / "final/manifest.json").read_bytes() == b"the winner"
+
+
 def test_final_reservation_failure(lib, monkeypatch):
     jid = ready(lib)
     fail_at(monkeypatch, "J3.mkdir")
@@ -245,6 +258,20 @@ def test_read_back_mismatch(lib, monkeypatch):
             (job_dir(lib, jid) / "final/manifest.json").write_bytes(b"{}")
 
     monkeypatch.setattr(h, "_fault", corrupt)
+    assert j.finalize(lib, jid).status is St.FINALIZED_UNVERIFIED
+
+
+def test_read_back_of_another_valid_manifest_is_unverified(lib, monkeypatch):
+    jid = ready(lib)
+
+    def swap(s):
+        if s == "J5.read":
+            p = job_dir(lib, jid) / "final/manifest.json"
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            doc["inputs"] = []
+            p.write_text(json.dumps(doc), encoding="utf-8")
+
+    monkeypatch.setattr(h, "_fault", swap)
     assert j.finalize(lib, jid).status is St.FINALIZED_UNVERIFIED
 
 

@@ -20,6 +20,7 @@ ONLY = set(sys.argv[3:])
 H, O, L, RB = "src/lpbfstudio/history.py", "src/lpbfstudio/outcomes.py", "src/lpbfstudio/library.py", "src/lpbfstudio/rebaseline.py"
 RES, WR, OC = "tests/test_history_resolver.py", "tests/test_history_writes.py", "tests/test_history_outcomes.py"
 LIB, HX, PF = "tests/test_history_library.py", "tests/test_history_rebaseline.py", "tests/test_history_profiles.py"
+J, JT = "src/lpbfstudio/jobs.py", "tests/test_jobs.py"
 POSIX_ONLY = {"L14", "L25", "P02"}  # what they break can only be observed where flock and the frozen report exist
 
 # (id, what it violates, file, [(old, new), ...], test files, expected failing test names[, extra pytest args])
@@ -241,6 +242,37 @@ MUTATIONS = [
      [('                self._write_settings(scope, _MACHINES, f, mp.model_dump_json(indent=2), _Intent("create", "created"))',
        '                _atomic_write(f, mp.model_dump_json(indent=2))')],
      [PF], ["test_seeded_default_profile_is_created_as_one_object"]),
+    # ABP-0.5: Build Job Manifest v0
+    ("J01", "pin the head instead of the current matching revision", J,
+     [('"object_id": res.object_id, "seq": res.seq,', '"object_id": res.object_id, "seq": res.head_seq,')],
+     [JT], ["test_history_ahead_pins_the_matching_revision_with_the_exact_warning"]),
+    ("J02", "accept an untracked input", J,
+     [("    if res.state is not h.PathState.TRACKED:\n", "    if res.state not in (h.PathState.TRACKED, h.PathState.UNTRACKED):\n")],
+     [JT], ["test_untracked_is_refused"]),
+    ("J03", "drop the history-ahead warning", J,
+     [("    if res.history_ahead:\n", "    if False:\n")],
+     [JT], ["test_history_ahead_pins_the_matching_revision_with_the_exact_warning"]),
+    ("J04", "make finalization not single-winner", J,
+     [("        h._mkdir(final, 0o755)\n", "        final.mkdir(exist_ok=True)\n")],
+     [JT], ["test_final_found_at_mkdir_loses_the_race_and_changes_nothing"]),
+    ("J05", "skip the pinned blob's hash in validation", J,
+     [('    if len(blob) != item["byte_length"] or h.sha256(blob) != want:\n', "    if False:\n")],
+     [JT], ["test_hash_or_length_mismatch"]),
+    ("J07", "allow a draft write after final exists", J,
+     [('        if state in ("finalized", "finalization_incomplete"):\n            return refused("job_finalized")\n', "")],
+     [JT], ["test_a_draft_after_final_exists_is_refused"]),
+    ("J08", "skip the blob re-verification at finalization", J,
+     [("    if blob != res.data:\n", "    if False:\n")],
+     [JT], ["test_a_blob_that_fails_its_re_verification_refuses"]),
+    ("J09", "skip the manifest read-back comparison", J,
+     [("    if back != json.loads(json.dumps(doc)):\n", "    if False:\n")],
+     [JT], ["test_read_back_of_another_valid_manifest_is_unverified"]),
+    ("J10", "finalize a damaged job", J,
+     [('    if state == "damaged":\n        return stop("job_damaged")\n', "")],
+     [JT], ["test_unknown_entry_is_damage_and_refuses"]),
+    ("J11", "accept an unknown manifest version", J,
+     [('    if doc["manifest_version"] != MANIFEST_VERSION or isinstance(doc["manifest_version"], bool):\n', "    if False:\n")],
+     [JT], ["test_unsupported_version"]),
     ("L26", "allow an external rebaseline mode", O,
      [('REBASELINE_MODES = frozenset({"upgrade", "restore"})', 'REBASELINE_MODES = frozenset({"upgrade", "restore", "external"})')],
      [OC, HX], ["test_rebaseline_external_mode_cannot_be_built", "test_there_is_no_other_mode"]),
