@@ -121,13 +121,9 @@ def test_process_saves_append_to_one_object(lib):
     lib.save_process(process())
     oid = resolved(lib, PR, PROCESS).object_id
     with lib.collect_outcomes() as sink:
-        lib.save_process(process(**{next(iter(_a_float_field(ProcessSettings))): 1.5}))
+        lib.save_process(process(global_beam_offset_mm=0.5))
     assert sink.last.complete and sink.last.object_id == oid and sink.last.seq == seq(2)
     assert head_of(lib, PR, PROCESS).source == {"object_id": oid, "seq": seq(1)}
-
-
-def _a_float_field(model):
-    return {name: f for name, f in model.model_fields.items() if f.annotation is float}
 
 
 def test_process_bytes_are_unchanged_by_history(lib, tmp_path):

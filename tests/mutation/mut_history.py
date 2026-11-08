@@ -19,8 +19,8 @@ PY, OUT = sys.argv[1], Path(sys.argv[2])
 ONLY = set(sys.argv[3:])
 H, O, L, RB = "src/lpbfstudio/history.py", "src/lpbfstudio/outcomes.py", "src/lpbfstudio/library.py", "src/lpbfstudio/rebaseline.py"
 RES, WR, OC = "tests/test_history_resolver.py", "tests/test_history_writes.py", "tests/test_history_outcomes.py"
-LIB, HX = "tests/test_history_library.py", "tests/test_history_rebaseline.py"
-POSIX_ONLY = {"L14", "L25"}  # what they break can only be observed where flock and the frozen report exist
+LIB, HX, PF = "tests/test_history_library.py", "tests/test_history_rebaseline.py", "tests/test_history_profiles.py"
+POSIX_ONLY = {"L14", "L25", "P02"}  # what they break can only be observed where flock and the frozen report exist
 
 # (id, what it violates, file, [(old, new), ...], test files, expected failing test names[, extra pytest args])
 MUTATIONS = [
@@ -215,6 +215,32 @@ MUTATIONS = [
       ("            outcome = _under_lock(lib, path, mode, object_id, expected_sha256, evidence)\n",
        "            evidence = _evidence(lib.sets_dir, file_name, mode)\n            outcome = _under_lock(lib, path, mode, object_id, expected_sha256, evidence)\n")],
      [HX], ["test_real_upgrade_then_rebaseline"]),
+    # ABP-0.4: machine profiles and process settings
+    ("P01", "write the process file with no history", L,
+     [('            self._write_settings(scope, _PROCESS, f, ps.model_dump_json(indent=2), _Intent())',
+       '            _atomic_write(f, ps.model_dump_json(indent=2))')],
+     [PF], ["test_first_process_save_creates_the_one_object"]),
+    ("P02", "bring profile saves inside the set locks (SIDE-1 is open)", L,
+     [('        with _phase_p(intent.operation, f"machines/{mp.name}.json") as scope:\n',
+       '        with _phase_p(intent.operation, f"machines/{mp.name}.json") as scope, self._writer_locks():\n')],
+     [PF], ["test_these_writers_take_no_lock"]),
+    ("P03", "let a history failure refuse a settings save", L,
+     [("                                    new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined)\n        _phase_c",
+       "                                    new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined)\n"
+       "        if hr.reason is not None:\n            raise LibraryError('history failed')\n        _phase_c")],
+     [PF], ["test_no_history_failure_changes_a_process_save", "test_no_history_failure_changes_a_profile_save"]),
+    ("P04", "record a profile import overwrite (IMP-1 is undecided)", L,
+     [('_Intent("import", "imported", lambda: _history.external_source(Path(path)), overwrite)',
+       '_Intent("import", "imported", lambda: _history.external_source(Path(path)), False)')],
+     [PF], ["test_import_overwrite_of_an_existing_profile_is_not_recorded"]),
+    ("P05", "file process settings under the wrong object type", L,
+     [('            self._write_settings(scope, _PROCESS, f, ps.model_dump_json(indent=2), _Intent())',
+       '            self._write_settings(scope, _MACHINES, f, ps.model_dump_json(indent=2), _Intent())')],
+     [PF], ["test_first_process_save_creates_the_one_object"]),
+    ("P06", "drop the outcome of a seeded default profile", L,
+     [('                self._write_settings(scope, _MACHINES, f, mp.model_dump_json(indent=2), _Intent("create", "created"))',
+       '                _atomic_write(f, mp.model_dump_json(indent=2))')],
+     [PF], ["test_seeded_default_profile_is_created_as_one_object"]),
     ("L26", "allow an external rebaseline mode", O,
      [('REBASELINE_MODES = frozenset({"upgrade", "restore"})', 'REBASELINE_MODES = frozenset({"upgrade", "restore", "external"})')],
      [OC, HX], ["test_rebaseline_external_mode_cannot_be_built", "test_there_is_no_other_mode"]),

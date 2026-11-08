@@ -20,6 +20,7 @@ with the close failure recorded on it as ``close_errno``.
 same lock hold: phase P is the existing checks and locks, phase H the history steps, phase C the existing write with its
 re-check, phase V a read-back. A history failure never changes the canonical result. A caller learns what happened by
 ``with lib.collect_outcomes() as sink:``; signatures, return values, exceptions and messages are what they always were.
+Machine profiles and process settings follow the same steps with no lock, as they always have (DC-001 §7.9).
 
 **Platform rule.** Where ``fcntl.flock`` does not exist (Windows), the set writers stay unlocked, by
 this explicit rule: no upgrade, report, apply or restore can run there, so a save races none of them.
@@ -267,6 +268,8 @@ def _final_check(held: Held) -> None:
 
 
 _SETS = _history.ObjectType.EXPOSURE_SET
+_MACHINES = _history.ObjectType.MACHINE_PROFILE
+_PROCESS = _history.ObjectType.PROCESS_SETTINGS
 
 
 @dataclass(frozen=True)
@@ -675,8 +678,16 @@ class Library:
         f = self.root / "process.json"
         return ProcessSettings.model_validate_json(f.read_text(encoding="utf-8")) if f.exists() else ProcessSettings()
 
+    def _write_settings(self, scope: _Scope, object_type: _history.ObjectType, f: Path, text: str, intent: _Intent) -> None:
+        """Phases H, C and V for a profile or the process file: the set steps, with no lock (DC-001 §7.9)."""
+        hr = _history.phase_h_write(self.root, object_type, self._rel(f), text, new_operation=intent.new_operation,
+                                    new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined)
+        _phase_c(scope, hr, lambda: _atomic_write(f, text))
+
     def save_process(self, ps: ProcessSettings) -> None:
-        _atomic_write(self.root / "process.json", ps.model_dump_json(indent=2))
+        f = self.root / "process.json"
+        with _phase_p("save", self._rel(f)) as scope:
+            self._write_settings(scope, _PROCESS, f, ps.model_dump_json(indent=2), _Intent())
 
     # ------------------------------------------------------------------ machine profiles
     #
@@ -693,7 +704,9 @@ class Library:
         if not self.machines_dir.exists() and not self.legacy_machine_file.exists():
             self.machines_dir.mkdir(parents=True)
             mp = MachineProfile()
-            _atomic_write(self.machines_dir / f"{_slug(mp.name)}.json", mp.model_dump_json(indent=2))
+            f = self.machines_dir / f"{_slug(mp.name)}.json"
+            with _phase_p("create", self._rel(f)) as scope:
+                self._write_settings(scope, _MACHINES, f, mp.model_dump_json(indent=2), _Intent("create", "created"))
 
     def load_machines(self) -> dict[str, MachineProfile]:
         """All readable profiles by name. Unreadable files and shadowed duplicates are listed in
@@ -728,26 +741,31 @@ class Library:
 
     def save_machine(self, mp: MachineProfile, overwrite: bool = True) -> None:
         """Save a profile to the file that already holds it, or to a new file in ``machines/``."""
-        self.load_machines()
-        f = self._machine_source.get(mp.name)
-        if f is not None:
-            if not overwrite:
-                raise LibraryError(f"machine profile {mp.name!r} already exists")
-        else:
-            f = self.machines_dir / f"{_slug(mp.name)}.json"
-            if f.exists():
-                try:
-                    other = MachineProfile.model_validate_json(f.read_text(encoding="utf-8")).name
-                    reason = f"which holds the profile {other!r}"
-                except (OSError, ValueError):
-                    reason = "which cannot be read"
-                raise LibraryError(f"{mp.name!r} would be stored in {f.name}, {reason}; choose another name")
-            self.machines_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(f, mp.model_dump_json(indent=2))
+        intent = _INTENT.get()
+        with _phase_p(intent.operation, f"machines/{mp.name}.json") as scope:
+            self.load_machines()
+            f = self._machine_source.get(mp.name)
+            if f is not None:
+                if not overwrite:
+                    raise LibraryError(f"machine profile {mp.name!r} already exists")
+            else:
+                f = self.machines_dir / f"{_slug(mp.name)}.json"
+                if f.exists():
+                    try:
+                        other = MachineProfile.model_validate_json(f.read_text(encoding="utf-8")).name
+                        reason = f"which holds the profile {other!r}"
+                    except (OSError, ValueError):
+                        reason = "which cannot be read"
+                    raise LibraryError(f"{mp.name!r} would be stored in {f.name}, {reason}; choose another name")
+                self.machines_dir.mkdir(parents=True, exist_ok=True)
+            scope.paths = [self._rel(f)]
+            self._write_settings(scope, _MACHINES, f, mp.model_dump_json(indent=2), intent)
 
     def import_machine(self, path: Path | str, overwrite: bool = False) -> MachineProfile:
-        mp = MachineProfile.model_validate_json(Path(path).read_text(encoding="utf-8"))
-        self.save_machine(mp, overwrite=overwrite)
+        with _phase_p("import", str(path)):
+            mp = MachineProfile.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        with _intent(_Intent("import", "imported", lambda: _history.external_source(Path(path)), overwrite)):
+            self.save_machine(mp, overwrite=overwrite)
         return mp
 
     def validate(self, es: ExposureSet, process: ProcessSettings | None = None) -> list[Issue]:
