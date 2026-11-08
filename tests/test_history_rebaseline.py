@@ -220,6 +220,12 @@ def test_upgraded_length_must_match_the_record(world):
     refused(world, "rebaseline_bytes")
 
 
+def test_bytes_changed_after_the_report_refuse(world):
+    """The report ran before the writer locks; under them the file is compared again."""
+    world.f.write_bytes(b"replaced after the report")
+    refused(world, "rebaseline_bytes", expected=sha(b"replaced after the report"))
+
+
 def test_prior_head_hash_must_match_the_source(world):
     world.record.source_sha256 = sha(b"not the head")
     refused(world, "rebaseline_head")

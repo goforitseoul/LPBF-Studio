@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import calc
-from ..doe import (DEFAULT_MAX_VARIANTS, collect_factors, count_text, generate, level_lines, parse_values,
+from ..doe import (DEFAULT_MAX_VARIANTS, batch_source, collect_factors, count_text, generate, level_lines, parse_values,
                    save_batch)
 from ..estimate import estimate_plan, fmt_duration
 from ..library import Library
@@ -133,7 +133,8 @@ class DoeDialog(QDialog):
         if problems:  # the library changed since the preview
             self.preview()
             return
-        result = save_batch(self.lib, self.variants)
+        with batch_source(self.base.name):
+            result = save_batch(self.lib, self.variants)
         self.created = result.saved
         if not result.complete:
             QMessageBox.warning(self, "DOE", result.report())

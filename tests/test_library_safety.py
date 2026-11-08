@@ -274,7 +274,8 @@ def test_no_temp_files_left_after_normal_saves(lib):
         lib.save(copy)
     lib.rename("A", "B")
     assert all(p.suffix == ".json" for p in lib.sets_dir.iterdir())
-    assert not [p for p in lib.root.iterdir() if p.name.startswith(".")]
+    # .history is the sidecar DC-001 v0.6 section 3.2 defines; anything else with a leading dot would be a stray temporary
+    assert not [p for p in lib.root.iterdir() if p.name.startswith(".") and p.name != ".history"]
     assert os.listdir(lib.sets_dir)
 
 

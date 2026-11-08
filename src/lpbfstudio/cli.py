@@ -9,7 +9,7 @@ from pathlib import Path
 import click
 
 from . import APP_NAME, __version__, calc
-from .doe import (DEFAULT_MAX_VARIANTS, collect_factors, count_text, generate, level_lines, parse_values,
+from .doe import (DEFAULT_MAX_VARIANTS, batch_source, collect_factors, count_text, generate, level_lines, parse_values,
                   save_batch)
 from .estimate import estimate_plan, fmt_duration
 from .library import Library, LibraryError, export_json
@@ -340,7 +340,8 @@ def doe(ctx: click.Context, base: str, factors: tuple[str, ...], template: str, 
         for v in variants:
             click.echo("would create " + v.name)
         return
-    result = save_batch(lib, variants, on_saved=lambda name: click.echo("created " + name))
+    with batch_source(es.name):
+        result = save_batch(lib, variants, on_saved=lambda name: click.echo("created " + name))
     if not result.complete:
         click.secho(f"error: {result.report()}", fg="red", err=True)
         sys.exit(130 if result.interrupted else 1)  # 130: the usual exit status after Ctrl+C

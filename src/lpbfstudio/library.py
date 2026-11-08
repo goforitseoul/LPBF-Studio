@@ -16,6 +16,11 @@ A close that fails while a writer's locks are released after a successful write 
 as that ``OSError``: the write is done, and it is not a refusal. A failed write keeps its own error,
 with the close failure recorded on it as ``close_errno``.
 
+**History.** Every set writer also keeps an immutable revision beside the file (DC-001 v0.6, ``history.py``), inside the
+same lock hold: phase P is the existing checks and locks, phase H the history steps, phase C the existing write with its
+re-check, phase V a read-back. A history failure never changes the canonical result. A caller learns what happened by
+``with lib.collect_outcomes() as sink:``; signatures, return values, exceptions and messages are what they always were.
+
 **Platform rule.** Where ``fcntl.flock`` does not exist (Windows), the set writers stay unlocked, by
 this explicit rule: no upgrade, report, apply or restore can run there, so a save races none of them.
 Two processes saving at once are not coordinated there. Everywhere else every failure refuses: a
@@ -32,13 +37,17 @@ import os
 import re
 import tempfile
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 try:
     import fcntl
 except ImportError:  # Windows: the platform rule above
     fcntl = None  # type: ignore[assignment]
 
+from . import history as _history
+from . import outcomes as _outcomes
 from .defaults import default_sets
 from .locks import RESULT, Held, LockRefused, Refusal, Step, acquire_writer, open_sets
 from .models import (
@@ -257,6 +266,70 @@ def _final_check(held: Held) -> None:
         raise LibraryLocked(_ABANDONED_TEXT, exc.refusal) from exc
 
 
+_SETS = _history.ObjectType.EXPOSURE_SET
+
+
+@dataclass(frozen=True)
+class _Intent:
+    """What a set write is, beyond "a save" (DC-001 §7.9): the outcome's operation and, for a new object, the record's."""
+    operation: str = "save"
+    new_operation: str = "created"
+    new_source: Any = None             # the record's source, or a callable that gives it
+    overwrite_undefined: bool = False  # IMP-1
+
+
+_INTENT: contextvars.ContextVar[_Intent] = contextvars.ContextVar("lpbf_library_write_intent", default=_Intent())
+
+
+@contextlib.contextmanager
+def _intent(intent: _Intent) -> Iterator[None]:
+    token = _INTENT.set(intent)
+    try:
+        yield
+    finally:
+        _INTENT.reset(token)
+
+
+class _Scope:
+    """One writer call: the paths a refusal before phase H is reported for, and whether its outcome has been delivered."""
+
+    def __init__(self, operation: str, paths: list[str]) -> None:
+        self.operation, self.paths, self.delivered = operation, paths, False
+
+
+@contextlib.contextmanager
+def _phase_p(operation: str, *paths: str) -> Iterator[_Scope]:
+    """Phase P: a refusal's outcome is delivered before the exception leaves the writer. Interrupts give none (§7.1)."""
+    scope = _Scope(operation, list(paths))
+    try:
+        yield scope
+    except Exception as exc:
+        if not scope.delivered:
+            for path in scope.paths:
+                _outcomes.deliver(_history.refused_outcome(operation, path, exc))
+        raise
+
+
+def _report(scope: _Scope, hr: _history.HResult, exc: BaseException | None) -> None:
+    """Phase V. The outcome is delivered before any exception leaves the writer."""
+    scope.delivered = True
+    try:
+        outcome = _history.conclude(hr, scope.operation, exc)
+    except _outcomes.InvalidOutcome:  # a defect in the report must never change the canonical result (D-7)
+        return
+    _outcomes.deliver(outcome)
+
+
+def _phase_c(scope: _Scope, hr: _history.HResult, step: Callable[[], None]) -> None:
+    """Phase C: the existing write, with its re-check, then phase V either way."""
+    try:
+        step()
+    except Exception as exc:
+        _report(scope, hr, exc)
+        raise
+    _report(scope, hr, None)
+
+
 class Library:
     def __init__(self, root: Path | str | None = None, seed: bool = True) -> None:
         self.root = Path(root) if root else default_library_path()
@@ -305,6 +378,21 @@ class Library:
     def _file(self, name: str) -> Path:
         return self.sets_dir / f"{_slug(name)}.json"
 
+    def _rel(self, f: Path) -> str:
+        return f.relative_to(self.root).as_posix()
+
+    def _target_text(self, name: str) -> str:
+        """The file a refused write of ``name`` was aimed at, for its outcome."""
+        try:
+            return self._rel(self._file(name))
+        except LibraryError:
+            return name
+
+    def collect_outcomes(self):
+        """``with lib.collect_outcomes() as sink:`` collects the ``WriteOutcome`` of every library write this thread makes
+        inside the block, in write order, each delivered before any exception leaves its writer (DC-001 §7.11)."""
+        return _outcomes.collect_outcomes()
+
     @staticmethod
     def _read(f: Path) -> ExposureSet:
         return _parse_set(f.read_text(encoding="utf-8"))
@@ -343,9 +431,19 @@ class Library:
         sets = default_sets()
         if all(self._file(es.name).exists() for es in sets):
             return  # nothing to write, so no lock: a read-only start never waits on or meets one
-        with self._writer_locks():
-            _atomic_write_all([(self._file(es.name), self._text(es)) for es in sets
-                               if not self._file(es.name).exists()])
+        missing = [self._rel(self._file(es.name)) for es in sets if not self._file(es.name).exists()]
+        with _phase_p("create", *missing) as scope, self._writer_locks():
+            items = [(self._file(es.name), self._text(es), es) for es in sets if not self._file(es.name).exists()]
+            started = [_history.phase_h_write(self.root, _SETS, self._rel(f), text, lock_change="locked" if es.locked else None)
+                       for f, text, es in items]
+            try:
+                _atomic_write_all([(f, text) for f, text, _ in items])
+            except Exception as exc:
+                for hr in started:
+                    _report(scope, hr, exc)
+                raise
+            for hr in started:
+                _report(scope, hr, None)
 
     def names(self) -> list[str]:
         return sorted(self.load_all(), key=str.lower)
@@ -421,8 +519,44 @@ class Library:
                 raise LibraryError(f"{direct.name} cannot be read: {str(exc).splitlines()[0]}") from exc
         raise LibraryError(f"no exposure set named {name!r}")
 
-    def _write(self, es: ExposureSet, f: Path) -> None:
-        _atomic_write(f, self._text(es))
+    def _write(self, es: ExposureSet, f: Path, scope: _Scope, intent: _Intent) -> None:
+        """Phases H, C and V of writing one set. The model is serialized once, here, before any history step."""
+        text = self._text(es)
+        hr = _history.phase_h_write(self.root, _SETS, self._rel(f), text, new_operation=intent.new_operation,
+                                    new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined,
+                                    lock_change="locked" if es.locked else None)
+        _phase_c(scope, hr, lambda: _atomic_write(f, text))
+
+    def _copy_source(self, f: Path | None) -> Callable[[], dict]:
+        """The record's source for a new object made from the set in ``f`` (§7.9), asked for only when it is needed."""
+        def source() -> dict:
+            if f is None:
+                raise _history.StepFailed(_outcomes.HistoryReason.SOURCE_READ_FAILED)
+            return _history.copy_source(self.root, _SETS, self._rel(f))
+        return source
+
+    @contextlib.contextmanager
+    def _doe_batch(self, base_name: str | None) -> Iterator[None]:
+        """Saves inside the block are DOE variants of the set ``base_name``. Without a known base they are recorded as
+        created, since a ``doe`` record must name its source."""
+        try:
+            f = self._locate(base_name) if base_name is not None else None
+        except OSError:
+            f = None
+        if f is None:
+            intent = _Intent("doe", "created")
+        else:
+            of_base = self._copy_source(f)
+            known: list[dict] = []
+
+            def once() -> dict:  # one base, one revision, for the whole batch
+                if not known:
+                    known.append(of_base())
+                return known[0]
+
+            intent = _Intent("doe", "doe", once)
+        with _history.read_cache(), _intent(intent):
+            yield
 
     @staticmethod
     def _text(es: ExposureSet) -> str:
@@ -439,7 +573,8 @@ class Library:
         return text
 
     def save(self, es: ExposureSet, overwrite: bool = True) -> None:
-        with self._writer_locks():
+        intent = _INTENT.get()
+        with _phase_p(intent.operation, self._target_text(es.name)) as scope, self._writer_locks():
             f = self._locate(es.name)
             if f is not None:
                 current = self._read(f)
@@ -455,21 +590,22 @@ class Library:
                 f = self._file(es.name)
                 if f.exists():
                     raise LibraryError(self._conflict(es.name, f))
-            self._write(es, f)
+            scope.paths = [self._rel(f)]
+            self._write(es, f, scope, intent)
 
     def copy(self, source: str, new_name: str) -> ExposureSet:
-        with self._writer_locks():
+        with _phase_p("copy", self._target_text(new_name)) as scope, self._writer_locks():
             self._check_free(new_name)
             es = self.get(source).model_copy(deep=True)
             es.name = new_name
             es.locked = False
             if es.description and not es.description.startswith("Copy of"):
                 es.description = f"Copy of {source}. {es.description}"
-            self._write(es, self._file(new_name))
+            self._write(es, self._file(new_name), scope, _Intent("copy", "copied", self._copy_source(self._locate(source))))
             return es
 
     def rename(self, old: str, new: str) -> ExposureSet:
-        with self._writer_locks():
+        with _phase_p("rename", self._target_text(new)) as scope, self._writer_locks():
             src = self._locate(old)
             if src is None:
                 raise LibraryError(f"no exposure set named {old!r}")
@@ -481,26 +617,37 @@ class Library:
             self._check_free(new, ignore=src)
             es.name = new
             dst = self._file(new)
-            self._write(es, dst)
-            if dst != src:
-                try:
-                    src.unlink()
-                except OSError as exc:
-                    dst.unlink(missing_ok=True)
-                    raise LibraryError(f"cannot rename {old!r}: {exc}") from exc
+            text = self._text(es)
+            hr = _history.phase_h_rename(self.root, _SETS, self._rel(src), self._rel(dst), text)
+
+            def step() -> None:
+                _atomic_write(dst, text)
+                if dst != src:
+                    try:
+                        src.unlink()
+                    except OSError as exc:
+                        dst.unlink(missing_ok=True)
+                        raise LibraryError(f"cannot rename {old!r}: {exc}") from exc
+
+            _phase_c(scope, hr, step)
             return es
 
     def delete(self, name: str) -> None:
-        with self._writer_locks():
+        with _phase_p("delete", self._target_text(name)) as scope, self._writer_locks():
             f = self._locate(name)
             if f is None:
                 raise LibraryError(f"no exposure set named {name!r}")
             if self._read(f).locked:
                 raise LibraryError(f"{name!r} is locked and cannot be deleted")
-            check = _FINAL_CHECK.get()
-            if check is not None:
-                check()  # rev5 §2.2 step 3a (B2b supplement, 2026-11-07): immediately before the unlink
-            f.unlink()
+            hr = _history.phase_h_delete(self.root, _SETS, self._rel(f))
+
+            def step() -> None:
+                check = _FINAL_CHECK.get()
+                if check is not None:
+                    check()  # rev5 §2.2 step 3a (B2b supplement, 2026-11-07): immediately before the unlink
+                f.unlink()
+
+            _phase_c(scope, hr, step)
 
     def unique_name(self, base: str) -> str:
         if not self.exists(base):
@@ -512,12 +659,14 @@ class Library:
 
     def import_file(self, path: Path | str, overwrite: bool = False) -> ExposureSet:
         path = Path(path)
-        try:
-            es = _parse_set(path.read_text(encoding="utf-8"))
-        except FileFormatError as exc:
-            raise LibraryError(f"{path.name} was not imported: {exc}") from exc
+        with _phase_p("import", str(path)):
+            try:
+                es = _parse_set(path.read_text(encoding="utf-8"))
+            except FileFormatError as exc:
+                raise LibraryError(f"{path.name} was not imported: {exc}") from exc
         es.locked = False
-        self.save(es, overwrite=overwrite)
+        with _intent(_Intent("import", "imported", lambda: _history.external_source(path), overwrite)):
+            self.save(es, overwrite=overwrite)
         return es
 
     # ------------------------------------------------------------------ settings

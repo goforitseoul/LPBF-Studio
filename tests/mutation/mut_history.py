@@ -17,8 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PY, OUT = sys.argv[1], Path(sys.argv[2])
 ONLY = set(sys.argv[3:])
-H, O = "src/lpbfstudio/history.py", "src/lpbfstudio/outcomes.py"
+H, O, L, RB = "src/lpbfstudio/history.py", "src/lpbfstudio/outcomes.py", "src/lpbfstudio/library.py", "src/lpbfstudio/rebaseline.py"
 RES, WR, OC = "tests/test_history_resolver.py", "tests/test_history_writes.py", "tests/test_history_outcomes.py"
+LIB, HX = "tests/test_history_library.py", "tests/test_history_rebaseline.py"
+POSIX_ONLY = {"L14", "L25"}  # what they break can only be observed where flock and the frozen report exist
 
 # (id, what it violates, file, [(old, new), ...], test files, expected failing test names[, extra pytest args])
 MUTATIONS = [
@@ -130,6 +132,92 @@ MUTATIONS = [
      [("    if present and any(v.state is ObjectState.D4 and v.head.path == path for v in views):\n"
        "        return Resolution(PathState.TOMBSTONED_PRESENT, **base)\n", "")],
      [RES], ["test_row6_tombstoned_file_present"]),
+
+    # ABP-0.3: the set writers
+    ("L01", "run the canonical write before phase H", L,
+     [("        hr = _history.phase_h_write(self.root, _SETS, self._rel(f), text, new_operation=intent.new_operation,\n",
+       "        _atomic_write(f, text)\n        hr = _history.phase_h_write(self.root, _SETS, self._rel(f), text, new_operation=intent.new_operation,\n"),
+      ("        _phase_c(scope, hr, lambda: _atomic_write(f, text))\n", "        _phase_c(scope, hr, lambda: None)\n")],
+     [LIB], ["test_the_re_check_runs_once_after_the_record_committed", "test_abandon_at_c_on_save_keeps_the_committed_record_and_the_prior_file"]),
+    ("L02", "let a history failure refuse the save", L,
+     [("        _phase_c(scope, hr, lambda: _atomic_write(f, text))\n",
+       "        if hr.reason is not None:\n            raise LibraryError('history failed')\n        _phase_c(scope, hr, lambda: _atomic_write(f, text))\n")],
+     [LIB], ["test_no_history_failure_changes_a_save"]),
+    ("L03", "skip the B2a re-check of the canonical write", L,
+     [("        _phase_c(scope, hr, lambda: _atomic_write(f, text))\n", "        _phase_c(scope, hr, lambda: _history._staging_write(f, text))\n")],
+     [LIB], ["test_the_re_check_runs_once_after_the_record_committed", "test_abandon_at_c_on_save_keeps_the_committed_record_and_the_prior_file"]),
+    ("L04", "serialize the model a second time for the canonical write", L,
+     [("        _phase_c(scope, hr, lambda: _atomic_write(f, text))\n", "        _phase_c(scope, hr, lambda: _atomic_write(f, self._text(es)))\n")],
+     [LIB], ["test_the_model_is_serialized_once"]),
+    ("L05", "lose the outcome of a failed canonical step", L,
+     [("    except Exception as exc:\n        _report(scope, hr, exc)\n        raise\n    _report(scope, hr, None)",
+       "    except Exception as exc:\n        raise\n    _report(scope, hr, None)")],
+     [LIB], ["test_canonical_failure_keeps_its_own_exception_and_message"]),
+    ("L06", "give no outcome for a refusal", L,
+     [("        if not scope.delivered:\n", "        if False:\n")],
+     [LIB], ["test_refusals_in_phase_p"]),
+    ("L07", "deliver a failed write twice", L,
+     [("    scope.delivered = True\n    try:\n        outcome = _history.conclude", "    try:\n        outcome = _history.conclude")],
+     [LIB], ["test_the_outcome_is_in_the_sink_before_the_exception_leaves"]),
+    ("L08", "let a defective report change the canonical result", L,
+     [("    except _outcomes.InvalidOutcome:  # a defect", "    except ZeroDivisionError:  # a defect")],
+     [LIB], ["test_an_invalid_outcome_never_changes_the_canonical_result"]),
+    ("L09", "record an import overwrite (IMP-1 is undecided)", L,
+     [('_Intent("import", "imported", lambda: _history.external_source(path), overwrite)', '_Intent("import", "imported", lambda: _history.external_source(path), False)')],
+     [LIB], ["test_import_overwrite_of_an_existing_set_is_not_recorded"]),
+    ("L10", "treat every copy source as untracked", H,
+     [('    res = resolve(root, object_type, path)\n    if res.state is PathState.TRACKED:\n        return {"object_id": res.object_id, "seq": res.seq}\n    if res.data is None:',
+       '    res = resolve(root, object_type, path)\n    if res.data is None:')],
+     [LIB], ["test_copy_is_a_new_object_naming_its_tracked_source"]),
+    ("L12", "drop the lock change", L,
+     [('                                    lock_change="locked" if es.locked else None)\n        _phase_c', '                                    lock_change=None)\n        _phase_c')],
+     [LIB], ["test_a_new_locked_set_records_the_lock_change"]),
+    ("L13", "drop the delete re-check", L,
+     [("                    check()  # rev5 §2.2 step 3a", "                    pass  # rev5 §2.2 step 3a")],
+     [LIB], ["test_delete_re_checks_after_the_tombstone_committed", "test_abandon_at_c_on_delete_leaves_tombstone_and_file"]),
+    ("L14", "run a save outside the writer locks", L,
+     [("        with _phase_p(intent.operation, self._target_text(es.name)) as scope, self._writer_locks():",
+       "        with _phase_p(intent.operation, self._target_text(es.name)) as scope:")],
+     [LIB], ["test_phase_h_runs_inside_the_lock_hold"]),
+    ("L16", "trust the batch cache without checking the folders", H,
+     [("        if known is not None and known[0] == signature:\n", "        if known is not None:\n")],
+     [LIB], ["test_inside_a_batch_a_new_revision_is_seen", "test_inside_a_batch_a_new_entry_in_an_object_is_damage"]),
+    ("L17", "skip the prior head check", RB,
+     [('    if res.head is None or res.head.kind != "content" or (res.head.hash, res.head.byte_length) != evidence.want_head:', "    if False:")],
+     [HX], ["test_prior_head_hash_must_match_the_source", "test_restore_prior_head_must_match"]),
+    ("L18", "skip the caller's expected hash", RB,
+     [("    if digest != expected_sha256:\n", "    if False:\n")],
+     [HX], ["test_expected_hash_must_match"]),
+    ("L19", "skip the comparison of the file with its record under the locks", RB,
+     [("    if (digest, len(data)) != evidence.want_bytes:\n", "    if False:\n")],
+     [HX], ["test_bytes_changed_after_the_report_refuse"]),
+    ("L20", "accept a changed-since-upgrade report (P14)", RB,
+     [('report.rule not in ("P12", "P24"):', 'report.rule not in ("P12", "P24", "P14"):')],
+     [HX], ["test_upgrade_mode_refuses_any_other_report"]),
+    ("L21", "accept P22 as restored evidence", RB,
+     [('or report.rule != "P20R":', 'or report.rule not in ("P20R", "P22"):')],
+     [HX], ["test_restore_mode_refuses_any_other_report"]),
+    ("L22", "let a rebaseline write the canonical file", RB,
+     [("    source = {**evidence.source, \"prior_head_seq\": res.head_seq}\n",
+       "    from . import library as _l\n    _l._atomic_write(lib.root / path, data.decode())\n"
+       "    source = {**evidence.source, \"prior_head_seq\": res.head_seq}\n")],
+     [HX], ["test_the_canonical_file_is_never_opened_for_writing"]),
+    ("L23", "rebaseline a tracked file", RB,
+     [("    if res.state is not h.PathState.CHANGED_OUTSIDE or res.claimant != object_id:",
+       "    if res.state not in (h.PathState.CHANGED_OUTSIDE, h.PathState.TRACKED) or res.claimant != object_id:")],
+     [HX], ["test_only_row_5_is_accepted"]),
+    ("L24", "ignore which object the caller named", RB,
+     [("    if res.state is not h.PathState.CHANGED_OUTSIDE or res.claimant != object_id:", "    if res.state is not h.PathState.CHANGED_OUTSIDE:")],
+     [HX], ["test_object_id_must_be_the_claimant"]),
+    ("L25", "run the frozen report under the writer locks", RB,
+     [("    try:\n        evidence = _evidence(lib.sets_dir, file_name, mode)\n    except _Refused as exc:\n        return refused(exc.reason, exc.detail, exc.errno)\n",
+       "    evidence = None\n"),
+      ("            outcome = _under_lock(lib, path, mode, object_id, expected_sha256, evidence)\n",
+       "            evidence = _evidence(lib.sets_dir, file_name, mode)\n            outcome = _under_lock(lib, path, mode, object_id, expected_sha256, evidence)\n")],
+     [HX], ["test_real_upgrade_then_rebaseline"]),
+    ("L26", "allow an external rebaseline mode", O,
+     [('REBASELINE_MODES = frozenset({"upgrade", "restore"})', 'REBASELINE_MODES = frozenset({"upgrade", "restore", "external"})')],
+     [OC, HX], ["test_rebaseline_external_mode_cannot_be_built", "test_there_is_no_other_mode"]),
 ]
 
 
@@ -143,7 +231,7 @@ def main() -> None:
     for m in MUTATIONS:
         mid, what, target, pairs, files, expected = m[:6]
         extra = list(m[6]) if len(m) > 6 else []
-        if ONLY and mid not in ONLY:
+        if (ONLY and mid not in ONLY) or (mid in POSIX_ONLY and sys.platform == "win32"):
             continue
         total += 1
         text = (ROOT / target).read_text(encoding="utf-8")

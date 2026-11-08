@@ -8,7 +8,9 @@ Layout, under ``<library>/.history/``::
 
 The resolver reads only and takes no lock. It fails closed: any structure that no protocol step or interruption can
 produce is damage, and damage makes every path of that type ``unknown``. Nothing here deletes, repairs or rewrites
-anything under ``.history/``, and there is no mutable index: every answer comes from the immutable revisions.
+anything under ``.history/``, and there is no mutable index: every answer comes from the immutable revisions. Inside one
+batch (``read_cache``) an object already verified in full is not read again while its folders are unchanged; that memory
+ends with the batch and nothing of it is ever written.
 
 Entry types come from an examination that does not follow links. On Windows a junction reports as a plain directory, so
 the reparse-point attribute decides there, not ``S_ISLNK`` or ``isjunction`` (ABP-0.1, EG-5).
@@ -20,6 +22,8 @@ canonical write routine with the B2a re-check cleared for that one call, because
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import errno as errno_codes
 import hashlib
 import json
@@ -32,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import __version__
 from .outcomes import (
@@ -417,12 +421,43 @@ def _valid_identity(raw: bytes, object_type: str, object_id: str) -> None:
     _text_value(doc["created_at"], "created_at")
 
 
+_READ_CACHE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("lpbf_history_read_cache", default=None)
+
+
+@contextlib.contextmanager
+def read_cache() -> Iterator[None]:
+    """Inside a batch of writes, an object verified in full with no incomplete folder is not read again while its object
+    and ``revisions`` folders are unchanged: a new revision or entry changes them. Memory only, for this block only."""
+    token = _READ_CACHE.set({})
+    try:
+        yield
+    finally:
+        _READ_CACHE.reset(token)
+
+
+def _signature(folder: Path) -> tuple | None:
+    try:
+        a, b = _lstat(folder), _lstat(folder / REVISIONS)
+    except OSError:
+        return None
+    return a.st_ino, a.st_mtime_ns, b.st_ino, b.st_mtime_ns
+
+
 def _classify_object(folder: Path, object_type: str, name: str) -> ObjectView:
     """§6.1.2. Raises ``OSError`` when something cannot be examined; that is row 0, not damage."""
+    cache = _READ_CACHE.get()
+    signature = _signature(folder) if cache is not None else None  # taken first, so a change during the scan is not cached
+    if signature is not None:
+        known = cache.get(folder)
+        if known is not None and known[0] == signature:
+            return known[1]
     try:
-        return _classify_inner(folder, object_type, name)
+        view = _classify_inner(folder, object_type, name)
     except _Damaged as exc:
         return ObjectView(name, ObjectState.D5, detail=str(exc))
+    if signature is not None and view.state in (ObjectState.D3, ObjectState.D4) and not view.incomplete:
+        cache[folder] = (signature, view)
+    return view
 
 
 def _classify_inner(folder: Path, object_type: str, name: str) -> ObjectView:
@@ -518,6 +553,7 @@ class Resolution:
     claimant: str | None = None            # the one object claiming the path, attached or not (rows 3, 4, 5)
     seq: str | None = None                 # the current matching revision
     head_seq: str | None = None
+    head: Record | None = None             # the object head, when one object claims the path
     history_ahead: bool = False
     data: bytes | None = None              # the exact bytes of the path, when it was read
     present: bool | None = None            # None when the path could not be examined
@@ -561,13 +597,13 @@ def resolve(root: Path | str, object_type: ObjectType, path: str) -> Resolution:
     if len(claims) == 1:
         x = claims[0]
         if not present:
-            return Resolution(PathState.MISSING, claimant=x.object_id, head_seq=x.head.seq, **base)
+            return Resolution(PathState.MISSING, claimant=x.object_id, head_seq=x.head.seq, head=x.head, **base)
         digest = sha256(data)
         for record in x.committed:  # highest first
             if record.kind == "content" and record.byte_length == len(data) and record.hash == digest:
                 return Resolution(PathState.TRACKED, object_id=x.object_id, claimant=x.object_id, seq=record.seq,
-                                  head_seq=x.head.seq, history_ahead=record.seq != x.head.seq, **base)
-        return Resolution(PathState.CHANGED_OUTSIDE, claimant=x.object_id, head_seq=x.head.seq, **base)
+                                  head_seq=x.head.seq, head=x.head, history_ahead=record.seq != x.head.seq, **base)
+        return Resolution(PathState.CHANGED_OUTSIDE, claimant=x.object_id, head_seq=x.head.seq, head=x.head, **base)
     if present and any(v.state is ObjectState.D4 and v.head.path == path for v in views):
         return Resolution(PathState.TOMBSTONED_PRESENT, **base)
     return Resolution(PathState.UNTRACKED if present else PathState.NONE, **base)
@@ -925,9 +961,10 @@ def _attach(hr: HResult, res: Resolution) -> dict | None:
 
 
 def phase_h_write(root: Path | str, object_type: ObjectType, path: str, text: str, *, new_operation: str = "created",
-                  new_source: dict | None = None, overwrite_undefined: bool = False,
+                  new_source: dict | Callable[[], dict] | None = None, overwrite_undefined: bool = False,
                   lock_change: str | None = None) -> HResult:
-    """Save, copy, DOE, import and create: §7.5 and §7.9. ``text`` has been serialized once by the caller."""
+    """Save, copy, DOE, import and create: §7.5 and §7.9. ``text`` has been serialized once by the caller. ``new_source``
+    is the record's source for a new object, or a callable giving it, which may raise ``StepFailed``."""
     hr = HResult(Path(root), object_type, path)
     res = resolve(hr.root, object_type, path)
     hr.prior = _prior_of(res)
@@ -939,7 +976,7 @@ def phase_h_write(root: Path | str, object_type: ObjectType, path: str, text: st
         return hr
     try:
         if res.state is PathState.NONE:
-            operation, source = new_operation, new_source
+            operation, source = new_operation, new_source() if callable(new_source) else new_source
             type_folder = ensure_object_root(hr.root, object_type)
             hr.object_id, folder = _reserve_object(type_folder)
             hr.artefacts = True
@@ -1005,6 +1042,38 @@ def copy_source(root: Path | str, object_type: ObjectType, path: str) -> dict:
     if res.data is None:
         raise StepFailed(HistoryReason.SOURCE_READ_FAILED, res.errno)
     return {"path": path, "content_hash": _hash_doc(res.data), "state": "untracked"}
+
+
+def external_source(path: Path) -> dict:
+    """§7.9: the record's source for an import. ``StepFailed`` when the file cannot be read."""
+    try:
+        return {"external_path": str(path), "content_hash": _hash_doc(_read_file(path))}
+    except OSError as exc:
+        raise StepFailed(HistoryReason.SOURCE_READ_FAILED, exc.errno) from exc
+
+
+@dataclass(frozen=True)
+class RebaselineWrite:
+    seq: str | None
+    committed: bool
+    reason: HistoryReason | None
+    errno: int | None
+
+
+def commit_rebaseline(root: Path, object_type: ObjectType, object_id: str, path: str, data: bytes, source: dict) -> RebaselineWrite:
+    """§7.12, B6 to B8: one more content revision of ``object_id`` holding exactly ``data``. Writes only under ``.history``."""
+    folder = root / HISTORY_DIR / OBJECTS_DIR / object_type.value / object_id
+    seq = None
+    try:
+        seq, rev = _allocate(folder, "B6")
+        _write_blob(rev, data, "B7")
+        doc = build_record(object_type.value, object_id, seq, "rebaselined", path, data=data, source=source)
+        durability = _commit_record(rev, doc, "B8")
+    except StepFailed as failure:
+        return RebaselineWrite(seq, False, failure.reason, failure.errno)
+    if durability is not None:
+        return RebaselineWrite(seq, True, HistoryReason.RECORD_DURABILITY_FAILED, durability)
+    return RebaselineWrite(seq, True, None, None)
 
 
 # --------------------------------------------------------------------------- phase V

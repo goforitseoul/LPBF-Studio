@@ -14,12 +14,14 @@ Rules (see docs/doe_audit.md):
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import itertools
 import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from pydantic import BaseModel
 
@@ -334,6 +336,20 @@ def _on_disk(lib: Library, es: ExposureSet) -> tuple[str, str]:
     return "different", f"its file holds a different set ({stored.name!r})"
 
 
+_BATCH_BASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("lpbf_doe_batch_base", default=None)
+
+
+@contextlib.contextmanager
+def batch_source(base_name: str) -> Iterator[None]:
+    """A ``save_batch`` inside this block saves variants generated from the set ``base_name``; their history records name
+    its current revision as their source (DC-001 §7.9, E-AC1)."""
+    token = _BATCH_BASE.set(base_name)
+    try:
+        yield
+    finally:
+        _BATCH_BASE.reset(token)
+
+
 def save_batch(lib: Library, variants: Sequence[ExposureSet],
                on_saved: Callable[[str], None] | None = None) -> BatchSave:
     """Save ``variants`` one by one as new sets, in order, stopping at the first library or
@@ -347,10 +363,11 @@ def save_batch(lib: Library, variants: Sequence[ExposureSet],
     out = BatchSave()
     reached = 0  # index of the variant being saved when the loop stopped
     try:
-        for reached, v in enumerate(variants):
-            lib.save(v, overwrite=False)
-            if on_saved is not None:
-                on_saved(v.name)
+        with lib._doe_batch(_BATCH_BASE.get()):
+            for reached, v in enumerate(variants):
+                lib.save(v, overwrite=False)
+                if on_saved is not None:
+                    on_saved(v.name)
         out.saved = [v.name for v in variants]
         return out
     except KeyboardInterrupt:

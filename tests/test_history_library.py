@@ -182,9 +182,11 @@ def test_rename_within_one_file_records_the_real_file_name(lib):
 @pytest.mark.skipif(sys.platform != "win32", reason="a case-only rename reaches one file only on a case-insensitive file system")
 def test_case_only_rename_records_the_file_as_it_is_on_disk(lib):
     lib.save(new_set("casey"))
-    lib.rename("casey", "CASEY")
-    assert sorted(p.name for p in lib.sets_dir.glob("c*.json")) == ["casey.json"]  # the file keeps its spelling
-    assert h.resolve(lib.root, T.EXPOSURE_SET, "sets/casey.json").state is S.TRACKED
+    with lib.collect_outcomes() as sink:
+        lib.rename("casey", "CASEY")
+    assert sorted(p.name for p in lib.sets_dir.glob("[cC]*.json")) == ["CASEY.json"]  # the replace gave it the new spelling
+    assert sink.last.complete and sink.last.path == "sets/CASEY.json"
+    assert h.resolve(lib.root, T.EXPOSURE_SET, "sets/CASEY.json").state is S.TRACKED
 
 
 def test_delete_writes_a_tombstone(lib):
@@ -309,7 +311,7 @@ def test_doe_batch_without_a_named_base_is_recorded_as_created(lib):
 
 
 def test_doe_is_non_transactional_and_each_variant_has_its_outcome(lib):
-    lib.save(new_set("P1_V2"))  # taken: the batch stops there, keeping what it saved
+    lib.save(new_set("P1_V2", description="already here"))  # taken: the batch stops there, keeping what it saved
     with lib.collect_outcomes() as sink:
         with doemod.batch_source("P1"):
             result = doemod.save_batch(lib, variants("P1", 3))
@@ -323,6 +325,62 @@ def test_a_doe_context_does_not_leak_into_later_saves(lib):
     with lib.collect_outcomes() as sink:
         lib.save(new_set("after"))
     assert sink.last.operation == "save" and head_of(lib, "after").operation == "created"
+
+
+def test_a_doe_batch_reads_each_verified_object_once(lib, monkeypatch):
+    """The budget for §7 finding P-5: linear in the objects, not quadratic. Counted, so it does not depend on the machine."""
+    reads = []
+    real = h._read_entry
+    monkeypatch.setattr(h, "_read_entry", lambda p: (reads.append(p), real(p))[1])
+    objects_before = len(objects(lib))
+    reads.clear()
+    count = 25
+    with doemod.batch_source("P1"):
+        assert doemod.save_batch(lib, variants("P1", count)).complete
+    assert len(reads) <= 3 * (objects_before + count) + count  # identity, record and blob of each object, once
+
+
+def test_outside_a_batch_every_resolution_reads_everything(lib, monkeypatch):
+    reads = []
+    real = h._read_entry
+    monkeypatch.setattr(h, "_read_entry", lambda p: (reads.append(p), real(p))[1])
+    resolved(lib, "P1")
+    first = len(reads)
+    resolved(lib, "P1")
+    assert first > 0 and len(reads) == 2 * first
+
+
+def test_inside_a_batch_a_new_revision_is_seen(lib):
+    with h.read_cache():
+        assert resolved(lib, "P1").seq == seq(1)
+        es = lib.get("P1")
+        es.description = "second"
+        lib.save(es)
+        r = resolved(lib, "P1")
+        assert (r.state, r.seq) == (S.TRACKED, seq(2))
+
+
+def test_inside_a_batch_a_new_entry_in_an_object_is_damage(lib):
+    with h.read_cache():
+        before = resolved(lib, "P1")
+        assert before.state is S.TRACKED
+        (lib.root / ".history/objects/exposure_set" / before.object_id / "junk").write_bytes(b"")
+        assert resolved(lib, "P1").state is S.UNKNOWN
+
+
+def test_outside_a_batch_a_changed_blob_is_damage_at_once(lib):
+    before = resolved(lib, "P1")
+    with h.read_cache():
+        resolved(lib, "P1")
+    blob = lib.root / ".history/objects/exposure_set" / before.object_id / "revisions" / seq(1) / "content"
+    blob.write_bytes(b"tampered")
+    assert resolved(lib, "P1").state is S.UNKNOWN
+
+
+def test_a_batch_cache_does_not_outlive_its_batch(lib):
+    with h.read_cache():
+        resolved(lib, "P1")
+    assert h._READ_CACHE.get() is None
 
 
 # --------------------------------------------------------------------------- phase P refusals
@@ -354,7 +412,7 @@ def test_refusals_in_phase_p(lib):
 
 def test_a_model_that_would_not_read_back_is_refused_before_any_history(lib):
     bad = new_set("Z1")
-    bad.schema_version = 99  # the model allows the assignment; _text refuses to write it
+    bad.__dict__["schema_version"] = 99  # a validation bypass; _text refuses to write it
     before = hist(lib)
     with lib.collect_outcomes() as sink:
         with pytest.raises(LibraryError):
@@ -838,11 +896,11 @@ WRITERS = {"save", "copy", "rename", "delete", "import_file", "ensure_defaults",
 # then each is listed here by file, enclosing function and method: a new caller, or a stale entry, fails the test below.
 PENDING_Q4L2 = {
     ("cli.py", "new", "save"), ("cli.py", "copy", "copy"), ("cli.py", "rename", "rename"), ("cli.py", "delete", "delete"),
-    ("cli.py", "set_param", "save"), ("cli.py", "machine_import", "import_machine"), ("cli.py", "import_cmd", "import_file"),
+    ("cli.py", "set_values", "save"), ("cli.py", "machine_import", "import_machine"), ("cli.py", "import_cmd", "import_file"),
     ("doe.py", "save_batch", "save"),
-    ("gui/app.py", "save_set", "save"), ("gui/app.py", "copy_set", "copy"), ("gui/app.py", "rename_set", "rename"),
+    ("gui/app.py", "save_current", "save"), ("gui/app.py", "copy_set", "copy"), ("gui/app.py", "rename_set", "rename"),
     ("gui/app.py", "delete_set", "delete"), ("gui/app.py", "new_set", "save"), ("gui/app.py", "edit_process", "save_process"),
-    ("gui/app.py", "edit_machines", "save_machine"), ("gui/app.py", "import_set", "import_file"),
+    ("gui/app.py", "edit_machine", "save_machine"), ("gui/app.py", "import_set", "import_file"),
 }
 # Writers called by other writers or by the constructor: the outer call's collector covers them.
 INTERNAL = {("library.py", "import_file", "save"), ("library.py", "import_machine", "save_machine"),
