@@ -436,7 +436,7 @@ def test_real_restore_of_a_set_tracked_only_at_its_upgraded_bytes(lib):
     assert up.upgrade_file(lib.sets_dir, F).result.value == "upgraded"
     make_object(lib.root, [(lib.sets_dir / F).read_bytes()], P, oid=ID_A)  # as if first adopted while upgraded
     assert resolved(lib).state is S.TRACKED
-    assert rs.restore_file(lib.sets_dir, F).result.value == "restored"
+    assert rs.restore_file(lib.sets_dir, F).outcome.value == "restored"
     assert (lib.sets_dir / F).read_bytes() == original
     assert resolved(lib).state is S.CHANGED_OUTSIDE  # no revision holds the original bytes
     report = rc.reconcile_file(lib.sets_dir, F)
@@ -455,7 +455,7 @@ def test_a_restored_set_after_an_upgrade_rebaseline_is_row_4_and_needs_nothing(l
     up.upgrade_file(lib.sets_dir, F)
     data = (lib.sets_dir / F).read_bytes()
     assert rb.rebaseline_set(lib, F, "upgrade", before.object_id, sha(data)).complete
-    assert rs.restore_file(lib.sets_dir, F).result.value == "restored"
+    assert rs.restore_file(lib.sets_dir, F).outcome.value == "restored"
     r = resolved(lib)
     assert (r.state, r.history_ahead) == (S.TRACKED, True)
     out = rb.rebaseline_set(lib, F, "restore", before.object_id, sha((lib.sets_dir / F).read_bytes()))

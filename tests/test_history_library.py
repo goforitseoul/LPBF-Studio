@@ -7,6 +7,7 @@ same context variable on Windows, where no lock sets it.
 """
 
 import ast
+import contextlib
 import errno
 import inspect
 import json
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from _history_support import seq, sha, tree
+from test_library_locks import holder
 from lpbfstudio import doe as doemod
 from lpbfstudio import history as h
 from lpbfstudio import library as libmod
@@ -727,14 +729,16 @@ def test_a_migration_folder_appearing_during_h_abandons_at_c(lib, monkeypatch):
     es.description = "x"
     before = (lib.sets_dir / "P1.json").read_bytes()
 
-    def appear(step):
-        if step == "S6.replace":
-            (lib.sets_dir / M).mkdir()
+    with contextlib.ExitStack() as stack:
+        def appear(step):
+            if step == "S6.replace":
+                (lib.sets_dir / M).mkdir()
+                stack.enter_context(holder((lib.sets_dir / M, "ex")))
 
-    monkeypatch.setattr(h, "_fault", appear)
-    with lib.collect_outcomes() as sink:
-        with pytest.raises(LibraryLocked) as e:
-            lib.save(es)
+        monkeypatch.setattr(h, "_fault", appear)
+        with lib.collect_outcomes() as sink:
+            with pytest.raises(LibraryLocked) as e:
+                lib.save(es)
     assert str(e.value) == ABANDONED and (lib.sets_dir / "P1.json").read_bytes() == before
     assert (sink.last.canonical, sink.last.history) == (C.NOT_DONE, H.RECORDED_NOT_CURRENT)
     assert resolved(lib, "P1").history_ahead  # DC-001 row C-1
@@ -822,7 +826,7 @@ def test_upgrade_reconcile_and_restore_ignore_history_and_write_none(lib):
     assert report.rule == "P12" and not report.unexpected
     assert hist(lib) == before
     assert resolved(lib, "F1").state is S.CHANGED_OUTSIDE
-    assert rs.restore_file(lib.sets_dir, "F1.json").result.value == "restored"
+    assert rs.restore_file(lib.sets_dir, "F1.json").outcome.value == "restored"
     assert hist(lib) == before
     assert resolved(lib, "F1").state is S.TRACKED  # the restored bytes are the tracked format 1 revision
 

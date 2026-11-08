@@ -81,6 +81,7 @@ def snap(root: Path) -> dict:
     size is left out: it depends on the file system (tmpfs counts entries), and its entries are here."""
     out = {}
     for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != ".history"]  # DC-001 C-1: an abandoned write keeps its committed revision there
         for name in dirs + files:
             p = Path(dirpath) / name
             st = os.lstat(p)
@@ -140,6 +141,8 @@ es = lib.get(sys.argv[2])
 es.description = "from the paused saver"
 real = os.replace
 def paused(src, dst):
+    if os.path.basename(os.path.dirname(dst)) != "sets":  # history's staging write comes first (DC-001 S3)
+        return real(src, dst)
     print("paused", flush=True)
     sys.stdin.readline()
     return real(src, dst)

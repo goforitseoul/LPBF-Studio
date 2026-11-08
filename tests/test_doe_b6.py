@@ -132,8 +132,7 @@ def test_interrupt_just_before_the_move_counts_it_as_failed(lib, monkeypatch, n)
 
 def test_interrupt_while_the_temporary_file_is_written(lib, monkeypatch):
     vs = variants(3)
-    # every set write now runs the routine twice, staging then canonical (DC-001 v0.6 S3 and S7): 4 is variant 2's own write
-    interrupt_fsync(monkeypatch, 4)
+    interrupt_fsync(monkeypatch, 2)
     out = run_batch(lib, vs)
     assert out.saved == [vs[0].name]
     assert [name for name, _ in out.failed] == [vs[1].name]

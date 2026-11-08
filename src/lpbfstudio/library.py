@@ -682,7 +682,7 @@ class Library:
         """Phases H, C and V for a profile or the process file: the set steps, with no lock (DC-001 §7.9)."""
         hr = _history.phase_h_write(self.root, object_type, self._rel(f), text, new_operation=intent.new_operation,
                                     new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined)
-        _phase_c(scope, hr, lambda: _atomic_write(f, text))
+        _phase_c(scope, hr, lambda: _atomic_write(f, text))  # no lock (§7.9)
 
     def save_process(self, ps: ProcessSettings) -> None:
         f = self.root / "process.json"

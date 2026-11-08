@@ -64,6 +64,8 @@ es = lib.get(sys.argv[2])
 es.description = "from the paused save"
 real = os.replace
 def paused(src, dst):
+    if os.path.basename(os.path.dirname(dst)) != "sets":  # history's staging write comes first (DC-001 S3)
+        return real(src, dst)
     print("paused", flush=True)
     sys.stdin.readline()
     return real(src, dst)
