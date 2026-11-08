@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -412,7 +413,7 @@ def test_record_with_temporary_file_is_integrity_failure(tmp_path):
 BAD_FIELDS = [
     {"record_version": 2}, {"record_version": "1"}, {"object_type": "machine_profile"}, {"object_id": ID_B}, {"seq": seq(9)},
     {"kind": "other"}, {"operation": "nonsense"}, {"path": "../a.json"}, {"path": "sets\\a.json"}, {"path": "/sets/a.json"},
-    {"path": "machines/a.json"}, {"path": "sets/a.txt"}, {"path": "sets/x/a.json"}, {"path": 5},
+    {"path": "machines/a.json"}, {"path": "sets/a.txt"}, {"path": "sets/x/a.json"}, {"path": 5}, {"path": "sets/a.json\n"},
     {"previous_path": "sets/b.json"}, {"content_hash": None}, {"content_hash": {"algorithm": "md5", "value": "0" * 64}},
     {"content_hash": {"algorithm": "sha256", "value": "Z" * 64}}, {"content_hash": "x"}, {"byte_length": None},
     {"byte_length": -1}, {"byte_length": True}, {"byte_length": "2"}, {"lock_change": "unlocked"}, {"created_at": 5},
@@ -615,6 +616,20 @@ def test_symlink_as_blob_or_record(tmp_path):
     os.symlink(tmp_path / "blob", r / "content")
     write_record(r, record_doc(2, data=b"x2"))
     assert state_of(tmp_path) is O.D5
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a file name cannot hold a newline on Windows")
+def test_a_trailing_newline_never_passes_as_an_id_or_a_number(tmp_path):
+    (tmp_path / ".history/objects" / SETS / (ID_A + "\n")).mkdir(parents=True)
+    assert resolve(tmp_path).state is S.UNKNOWN
+    shutil.rmtree(tmp_path / ".history")
+    make_object(tmp_path, [b"1"])
+    (objdir(tmp_path) / "revisions" / (seq(2) + "\n")).mkdir()
+    assert state_of(tmp_path) is O.D5
+
+
+def test_id_and_number_patterns_reject_a_trailing_newline():
+    assert not h._ID.match(ID_A + "\n") and not h._SEQ.match(seq(1) + "\n") and not h._SHA.match("0" * 64 + "\n")
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")

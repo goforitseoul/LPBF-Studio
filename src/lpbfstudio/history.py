@@ -52,14 +52,14 @@ _MAX_SEQ = 99_999_999
 _ATTEMPTS = 100
 _REPARSE_ATTRIBUTE = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 
-_ID = re.compile(r"^[0-9a-f]{32}$")
-_SEQ = re.compile(r"^[0-9]{8}$")
-_SHA = re.compile(r"^[0-9a-f]{64}$")
-_IDENTITY_TMP = re.compile(r"^\.identity\.json\.[0-9A-Za-z_-]+\.tmp$")
-_RECORD_TMP = re.compile(r"^\.record\.json\.[0-9A-Za-z_-]+\.tmp$")
+_ID = re.compile(r"\A[0-9a-f]{32}\Z")
+_SEQ = re.compile(r"\A[0-9]{8}\Z")
+_SHA = re.compile(r"\A[0-9a-f]{64}\Z")
+_IDENTITY_TMP = re.compile(r"\A\.identity\.json\.[0-9A-Za-z_-]+\.tmp\Z")
+_RECORD_TMP = re.compile(r"\A\.record\.json\.[0-9A-Za-z_-]+\.tmp\Z")
 _FILE_PART = r"[^/\\]+\.json"
-_SET_PATH = re.compile(rf"^sets/{_FILE_PART}$")
-_MACHINE_PATH = re.compile(rf"^machines/{_FILE_PART}$")
+_SET_PATH = re.compile(rf"\Asets/{_FILE_PART}\Z")
+_MACHINE_PATH = re.compile(rf"\Amachines/{_FILE_PART}\Z")
 
 # These keep history independent of anything patching or wrapping the ``os`` functions of the canonical path.
 _lstat = os.lstat
@@ -1035,14 +1035,6 @@ def conclude(hr: HResult, operation: str, exc: BaseException | None) -> WriteOut
     if hr.previous_path is not None:
         previous, previous_digest, _ = _read_back(hr.root / hr.previous_path, "V.read_previous")
 
-    if exc is None:
-        canonical, canonical_reason, canonical_error = CanonicalStatus.DONE, None, None
-    else:
-        shows_prior = hr.prior.shows(readback, digest) and (
-            hr.prior_previous is None or hr.prior_previous.shows(previous, previous_digest))
-        canonical = CanonicalStatus.NOT_DONE if shows_prior else CanonicalStatus.UNCERTAIN
-        canonical_reason, canonical_error = CanonicalReason.CANONICAL_STEP_FAILED, str(exc)
-
     reason, reason_errno = hr.reason, hr.errno
     if hr.committed:
         if readback is Readback.FAILED:
@@ -1061,6 +1053,16 @@ def conclude(hr: HResult, operation: str, exc: BaseException | None) -> WriteOut
                 reason = HistoryReason.CANONICAL_MISMATCH
     else:
         history = HistoryStatus.INCOMPLETE if hr.artefacts else HistoryStatus.NOT_RECORDED
+
+    if exc is None:
+        canonical, canonical_reason, canonical_error = CanonicalStatus.DONE, None, None
+    else:
+        shows_prior = hr.prior.shows(readback, digest) and (
+            hr.prior_previous is None or hr.prior_previous.shows(previous, previous_digest))
+        if history is HistoryStatus.RECORDED:  # the file shows the target, so "the prior state" proves nothing (C-2c)
+            shows_prior = False
+        canonical = CanonicalStatus.NOT_DONE if shows_prior else CanonicalStatus.UNCERTAIN
+        canonical_reason, canonical_error = CanonicalReason.CANONICAL_STEP_FAILED, str(exc)
 
     if hr.staged is not None:
         try:

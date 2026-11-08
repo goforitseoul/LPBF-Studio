@@ -613,6 +613,42 @@ def test_uncertain_absent_after_raise_on_a_prior_file(root):
     assert (out.canonical, out.readback, out.history) == (C.UNCERTAIN, R.ABSENT, H.RECORDED_NOT_CURRENT)
 
 
+def test_identical_bytes_then_a_failure_is_uncertain(root):
+    """The file shows the prior bytes and the target bytes at once: only C-2c is a valid report."""
+    canonical(root, bytes_of(TEXT))
+    h.phase_h_write(root, ST, P, TEXT)  # adopts, then revision 2 of the same bytes
+    hr = h.phase_h_write(root, ST, P, TEXT)
+    out = h.conclude(hr, "save", OSError(errno.EIO, "x"))
+    assert (out.canonical, out.readback, out.history, out.history_reason) == (
+        C.UNCERTAIN, R.READ, H.RECORDED, HR.CANONICAL_STEP_FAILED)
+
+
+def _matrix():
+    target, prior_other = b"target", b"prior"
+    reads = {"target": (R.READ, sha(target), None), "prior": (R.READ, sha(prior_other), None), "other": (R.READ, sha(b"z"), None),
+             "absent": (R.ABSENT, None, None), "failed": (R.FAILED, None, 5)}
+    priors = {"unknown": h._Prior(False), "absent": h._Prior(True, False), "other": h._Prior(True, True, prior_other),
+              "same": h._Prior(True, True, target)}
+    targets = {"none": dict(committed=False, artefacts=False, reason=HR.STAGING_WRITE_FAILED),
+               "incomplete": dict(committed=False, artefacts=True, seq=seq(2), reason=HR.BLOB_WRITE_FAILED),
+               "content": dict(committed=True, artefacts=True, seq=seq(2), target_hash=sha(target), target_length=len(target)),
+               "durability": dict(committed=True, artefacts=True, seq=seq(2), target_hash=sha(target), target_length=len(target),
+                                  reason=HR.RECORD_DURABILITY_FAILED, errno=5),
+               "tombstone": dict(committed=True, artefacts=True, seq=seq(2))}
+    return [(r, p, t, e) for r in reads for p in priors for t in targets for e in (False, True)], reads, priors, targets
+
+
+CASES, READS, PRIORS, TARGETS = _matrix()
+
+
+@pytest.mark.parametrize("read,prior,target,raised", CASES)
+def test_conclude_builds_a_valid_outcome_for_every_state(root, monkeypatch, read, prior, target, raised):
+    monkeypatch.setattr(h, "_read_back", lambda path, step: READS[read])
+    hr = h.HResult(root, ST, P, prior=PRIORS[prior], object_id=ID_A, **TARGETS[target])
+    out = h.conclude(hr, "save", OSError(errno.EIO, "x") if raised else None)  # raises InvalidOutcome if not a table row
+    assert (out.canonical is C.DONE) == (not raised)
+
+
 def test_s6_returned_and_differs(root):
     tracked_at_1(root)
     hr = h.phase_h_write(root, ST, P, TEXT)
