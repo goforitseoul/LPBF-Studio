@@ -212,6 +212,25 @@ not re-checked just before they changed the folder. B2b (below) closes this for 
   is only recorded on it (`close_errno`). The CLI and the editor do not catch this rare error. This
   behaviour is unchanged from B2a and is pinned by tests.
 
+## Restore (B3, 2026-11-07)
+
+`lpbfstudio.restore.restore_file` puts an upgraded set file back to the exact format 1 bytes of
+its backup; it is a library function with no CLI or GUI entry. Full behaviour: `docs/restore.md`.
+What matters for the file layout:
+
+- Each attempt keeps its own folder `.format1-backup/restores/<restore_id>/` with `restore.json`
+  (restore record schema version 1, unchanged), `preserved/<file>` (the upgraded bytes) and
+  `swap/<file>` (the staged original, and after the exchange the displaced upgraded file). These
+  are never removed, by restore or by anything else in this build.
+- The set file itself is replaced by one atomic exchange; nothing else is created in the sets
+  folder. Only the bytes are restored: the restored file has a new inode, mode `0o644` less the
+  umask (unless the folder has a default ACL), the restoring user as owner, new timestamps and no
+  copied extended attributes.
+- Restore holds the exclusive locks on the sets folder and the migration folder for its whole run,
+  so this build's writers refuse during a restore with the message above. Restore runs only on
+  Linux x86_64, on ext4 or tmpfs; it refuses everywhere else, Windows included, before any write.
+- The operating restriction for older builds applies to restore as it does to upgrade.
+
 ## Out of scope
 
 Upgrading format 1 sets to format 2 (S3), exporting a format 2 set as a format 1 copy (S4) and

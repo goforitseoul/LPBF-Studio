@@ -1,5 +1,27 @@
 # Release notes
 
+## Unreleased: Restore (B3, 2026-11-07)
+
+**New**
+- `lpbfstudio.restore.restore_file(sets_dir, name)` puts one upgraded set file back to the exact
+  format 1 bytes of its backup, with one atomic exchange. The upgraded file is kept in the attempt
+  folder (`.format1-backup/restores/<id>/swap/`), next to a preserved copy; nothing is ever deleted.
+- Only a verified, unedited upgrade with an unambiguous history is restored. An edited format 2 set
+  (P14) is never restored. Every result says whether it is confirmed (observed and durable) or not.
+- Restore holds the library locks for its whole run: saves and upgrades refuse or report busy
+  meanwhile, in this build and, through the migration-folder lock, in older builds.
+
+**Limits**
+- Linux x86_64 on ext4 or tmpfs only; refused everywhere else (Windows, FUSE and network folders
+  included) before anything is written.
+- No CLI or GUI command yet, on purpose: an interrupted or uncertain restore cannot yet be
+  finalised or cleared (no approved recovery procedure), and blocks that file, or with G6 the whole
+  library, until one exists.
+- Successful `fsync` calls are what the kernel reported, not a power-loss guarantee.
+- Only the bytes are restored, not the file's mode, owner, ACLs, extended attributes or times.
+
+Details: `docs/restore.md`.
+
 ## Unreleased: delete re-check (B2b, 2026-11-07)
 
 **Changes**

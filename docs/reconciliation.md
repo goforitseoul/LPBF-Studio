@@ -7,9 +7,11 @@ trail are in `docs/audit/b7p2_s3b2/`.
 
 S3-B2c-a (2026-11-03) extends **the report only** to read restore evidence; see "Restore
 evidence in the report" below. the project owner accepted it with follow-up on 2026-11-04
-(`docs/audit/b7p2_s3b2c/s3b2c_a_acceptance.md`); it is not committed. **Restore itself (S3-B2c-b) is not
-implemented**: nothing in this build creates, exchanges, finalises or removes restore evidence.
-The frozen Restore design is `docs/audit/b7p2_s3b2c/design/report_rev5.md`.
+(`docs/audit/b7p2_s3b2c/s3b2c_a_acceptance.md`); it is not committed. That paragraph was written
+before Restore existed. **Since B3 (2026-11-07) Restore is implemented** (`lpbfstudio.restore`,
+`docs/restore.md`): it creates attempt folders and restore records and exchanges the set file. The
+report is unchanged and still writes nothing; nothing in this build finalises or removes restore
+evidence. The frozen Restore design is `docs/audit/b7p2_s3b2c/design/report_rev5.md`.
 
 ## Two separate capabilities
 
@@ -241,5 +243,7 @@ this outcome.
     coordinated with a save already under way in this build. In one tested order of that case,
     both reported success and the save's content was lost (neither in the set file nor the
     backup). This is not fixed. Details: `docs/file_format.md`, "Library locks and older builds".
-- **S3-B2c-a reads restore evidence only.** No Restore, no D-6 finalisation, no force, batch or
-  automatic restore, and no CLI or GUI exist.
+- **S3-B2c-a reads restore evidence only.** Restore itself is B3 (`docs/restore.md`); there is
+  still no D-6 finalisation, no G6 resolution, no force, batch or automatic restore, and no CLI or
+  GUI for any of them. An interrupted or uncertain restore (P18-P21) blocks its file, and G6 blocks
+  the library, until a recovery procedure is approved (OD-6, OD-7).
