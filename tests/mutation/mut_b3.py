@@ -138,6 +138,28 @@ MUTATIONS = [
        "    _file_checks(check, (\"PX-13\", \"PX-14\", \"PX-15\", \"PX-16\"), w_l, w_r, run.i_s, w_r.data if not "
        "isinstance(w_r, str) else run.U)")],
      [OR], ["test_a_displaced_file_with_other_bytes_is_uncertain_with_the_displaced_facts"]),
+    ("M29", "lose the lock-release facts (the outcome is returned without them)",
+     [("    if not run.release:\n        return outcome\n", "    if True:\n        return outcome\n")],
+     ["tests/test_restore_release.py"], ["test_an_unlock_failure_after_a_refusal_keeps_the_refusal",
+                                         "test_an_unlock_failure_after_a_restore_keeps_the_confirmed_restore"]),
+    ("M30", "let a release failure replace the outcome",
+     [("    return replace(outcome, reason=", "    return replace(outcome, outcome=Result.UNCERTAIN, confirmed=False, "
+       "reason=")],
+     ["tests/test_restore_release.py"], ["test_an_unlock_failure_after_a_refusal_keeps_the_refusal",
+                                         "test_an_unlock_failure_after_a_restore_keeps_the_confirmed_restore"]),
+    ("M31", "skip closing the library-folder descriptors (leave them to the frozen context)",
+     [("        for what, fds in ((\"attempt folder\", self.fds), (\"library folder\", ctx.fds)):",
+       "        for what, fds in ((\"attempt folder\", self.fds),):")],
+     ["tests/test_restore_release.py"], ["test_a_library_folder_close_failure_after_a_restore_is_reported",
+                                         "test_every_descriptor_is_closed_exactly_once"]),
+    ("M32", "let a record-contract refusal escape as an exception (fix B)",
+     [("    except RestoreRecordError as exc:  # never expected: the run stops before the update, with nothing written",
+       "    except ZeroDivisionError as exc:  # never expected: the run stops before the update, with nothing written")],
+     ["tests/test_restore_release.py"], ["test_a_record_refused_by_the_contract_stops_the_run_with_nothing_written"]),
+    ("M33", "say 'stopped before the exchange' after a class A exchange error (fix C)",
+     [("    if status is RestoreStatus.FAILED and run.stage == \"ST-PRE\":",
+       "    if status is RestoreStatus.FAILED:")],
+     ["tests/test_restore_release.py"], ["test_a_class_a_failed_record_does_not_say_it_stopped_before_the_exchange"]),
 ]
 
 

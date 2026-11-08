@@ -57,7 +57,7 @@ import hashlib
 import os
 import secrets
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -349,6 +349,7 @@ class _Run:
         self.i_t_candidate: tuple[int, int] | None = None
         self.r8_started = False
         self.fds: list[int] = []
+        self.release: list[str] = []
         self.a_fd = self.p_fd = self.w_fd = None
         self.i_a = self.i_p = self.i_w = None
         self.i_a_nlink: int | None = None
@@ -393,13 +394,29 @@ class _Run:
         self.fds.append(fd)
         return fd
 
-    def close_all(self) -> None:
-        for fd in reversed(self.fds):
-            try:
-                _close(fd, "attempt folder")
-            except OSError as exc:
-                self.note("closing a folder descriptor", f"failed: {_text(exc)}")
-        self.fds.clear()
+    def close_all(self, ctx) -> None:
+        """Close every descriptor of the run once: the attempt folders, then the folders held in the
+        operation's context (the sets folder, M, records, restores and the baseline attempts), which
+        frees the locks. A failure is kept as a release fact; it never replaces the outcome."""
+        for what, fds in (("attempt folder", self.fds), ("library folder", ctx.fds)):
+            for fd in reversed(fds):
+                try:
+                    _close(fd, what)
+                except OSError as exc:
+                    self.release.append(f"closing a {what} descriptor failed ({_text(exc)}); on Linux the "
+                                        "descriptor is released even so (inferred from close(2))")
+            fds.clear()
+        ctx.dirs.clear()
+
+
+def _with_release(run: _Run, outcome: RestoreOutcome) -> RestoreOutcome:
+    """The outcome with the release facts added. Cleanup never replaces the outcome (the B1b
+    contract): the result, ``confirmed`` and every record and exchange field are kept as decided; the
+    facts are appended to the reason and to the observations."""
+    if not run.release:
+        return outcome
+    return replace(outcome, reason=f"{outcome.reason}; releasing the locks: {'; '.join(run.release)}",
+                   observations=outcome.observations + tuple(Observation("lock release", t) for t in run.release))
 
 
 def restore_file(sets_dir: Path | str, file_name: str, *, now: str | None = None) -> RestoreOutcome:
@@ -421,16 +438,14 @@ def restore_file(sets_dir: Path | str, file_name: str, *, now: str | None = None
                                                        "nothing was read or written", True)
     base = Path(os.path.realpath(sets_dir))
     run = _Run(base, file_name, now)
-    try:
-        with up._context(fresh=True) as ctx:
-            try:
-                return _restore(run, ctx)
-            except _Stop as stop:
-                return stop.outcome
-            finally:
-                run.close_all()
-    except _Stop as stop:  # raised while releasing; never expected
-        return stop.outcome
+    with up._context(fresh=True) as ctx:
+        try:
+            outcome = _restore(run, ctx)
+        except _Stop as stop:
+            outcome = stop.outcome
+        finally:  # also when an interrupt propagates: the locks end with the descriptors
+            run.close_all(ctx)
+    return _with_release(run, outcome)
 
 
 def _platform_problem() -> str | None:
@@ -487,14 +502,14 @@ def _restore(run: _Run, ctx) -> RestoreOutcome:
         run.refuse(result, f"{exc.detail}; nothing was written")
     try:
         return _locked(run, ctx, held)
-    finally:
+    finally:  # the outcome is already decided; release facts are added to it afterwards (_with_release)
         try:
             held.release()
-        except OSError as exc:  # B1b contract: a close failure on release is an OSError; ours are not closed here
-            run.note("lock release", f"failed: {_text(exc)}")
+        except OSError as exc:  # B1b contract: only a descriptor locks.py owns is closed there; none is here
+            run.release.append(f"release failed ({_text(exc)})")
         if held.unlock_error is not None:
-            run.note("lock release", f"unlocking failed ({_text(held.unlock_error)}); the locks end when the "
-                                     "descriptors are closed, which follows")
+            run.release.append(f"unlocking failed ({_text(held.unlock_error)}); the locks end when the run closes "
+                               "its descriptors, which it does next")
 
 
 def _same_mount(run: _Run, fd: int, what: str, result: Result) -> None:
@@ -792,7 +807,10 @@ def _build(run: _Run, rid: str, status: RestoreStatus) -> RestoreRecord:
 
 def _validated(data: dict) -> RestoreRecord:
     """The record through the frozen contract (FE-7): parse(dump(record))."""
-    rec = RestoreRecord.model_validate(data) if isinstance(data, dict) else data
+    try:
+        rec = RestoreRecord.model_validate(data) if isinstance(data, dict) else data
+    except ValueError as exc:  # pydantic's ValidationError: refused by the frozen contract
+        raise RestoreRecordError(f"invalid restore record: {exc}") from None
     return rr.parse_restore_record(rr.dump_restore_record(rec))
 
 
@@ -1216,7 +1234,11 @@ def _parse_quiet(data: bytes) -> RestoreRecord | None:
 
 def _update(run: _Run, op: str, new: RestoreRecord) -> None:
     """W-07, W-09 or W-10 (before the exchange). A failure ends the run by SM 3.7, 3.8, 3.10."""
-    new = _validated(new.model_dump(mode="json"))
+    try:
+        new = _validated(new.model_dump(mode="json"))
+    except RestoreRecordError as exc:  # never expected: the run stops before the update, with nothing written
+        run.stop(Result.UNCERTAIN, f"{op}: the next record is refused by the contract ({exc}); nothing was written",
+                 confirmed=False, predicted="unknown")
     fail = _u_update(run, new, op)
     if fail is None:
         run.wrote(op, True)
@@ -1410,8 +1432,13 @@ def _fe_decide(run: _Run, fe: dict, error: str, allow_failed: bool) -> None:
 
 def _failure_write(run: _Run, op: str, status: RestoreStatus, error: str, listed: str) -> None:
     """W-14 (failed) or W-15 (uncertain); the run ends here in every case."""
-    text = (f"the restore stopped before the exchange: {error}; the set file was verified unchanged (the upgraded "
-            "bytes)" if status is RestoreStatus.FAILED else error)
+    if status is RestoreStatus.FAILED and run.stage == "ST-PRE":
+        text = (f"the restore stopped before the exchange: {error}; the set file was verified unchanged (the "
+                "upgraded bytes)")
+    elif status is RestoreStatus.FAILED:  # E-5: the exchange call returned a class A error
+        text = f"{error}; the set file was verified unchanged (the upgraded bytes) after the error"
+    else:
+        text = error
     try:
         new = _validated(_final_data(run, status, text))
     except (RestoreRecordError, ValueError) as exc:  # FE-7 refused it: nothing is written

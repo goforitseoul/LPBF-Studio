@@ -42,3 +42,8 @@ desktop.ini
 
 # Internal review records: kept locally, never published
 docs/audit/
+
+# Locally installed agent skills (npx skills add)
+/.agents/
+/.claude/skills/
+/skills-lock.json

@@ -111,7 +111,13 @@ never waits and never retries:
 
 While it runs, this build's saves, copies, renames, deletes and imports are refused at once (the
 editor keeps its unsaved changes), and upgrades, reports and applies of this or an older build get
-`busy`. A killed restore leaves no lock behind. Older builds' saves take no lock and are not
+`busy`. A killed restore leaves no lock behind.
+
+At the end restore unlocks both folders and then closes every descriptor it opened, once each,
+which ends the locks even if an unlock failed. A failed unlock or close never changes the outcome
+already decided (its result, `confirmed`, and the record and exchange fields stay as they were); it
+is added to the reason ("releasing the locks: …") and to the observations under "lock release". An
+interrupt that is already on its way out is passed on unchanged. Older builds' saves take no lock and are not
 coordinated: see the operating restriction in `docs/file_format.md`.
 
 ## Durability, and what it does not mean
