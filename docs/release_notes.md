@@ -1,5 +1,14 @@
 # Release notes
 
+## Unreleased: revision history (ABP-0, 2026-11-08)
+
+**Changes**
+- Every explicit write of a set, machine profile or process file also keeps an immutable revision in `<library>/.history/`. The files themselves are written exactly as before. See `docs/history.md`.
+- A failure to record history never stops a save.
+- Build job manifests can pin exact revisions. They have no command or menu entry yet.
+
+**Not yet in this build.** The command line and the editor do not show whether a save was recorded. History grows without limit, and saves take longer as it grows.
+
 ## Unreleased: Restore (B3, 2026-11-07)
 
 **New**
