@@ -213,7 +213,7 @@ def test_compare_dialog_lists_the_differences(win):
     es = win.lib.get("P2")
     es.description = "different"
     win.lib.save(es)
-    dlg = CompareDialog(win.lib, "P1")
+    dlg = CompareDialog(win.lib, "P1", win)
     dlg.b.setCurrentText("P2")
     rows = {dlg.table.item(r, 0).text(): (dlg.table.item(r, 1).text(), dlg.table.item(r, 2).text())
             for r in range(dlg.table.rowCount())}
@@ -225,14 +225,14 @@ def test_compare_dialog_lists_the_differences(win):
 def test_compare_dialog_with_no_current_set(win):
     from lpbfstudio.gui.dialogs import CompareDialog
 
-    dlg = CompareDialog(win.lib, None)
+    dlg = CompareDialog(win.lib, None, win)
     assert dlg.a.count() == len(win.lib.names())
 
 
 def test_estimate_dialog_calculates_a_plan(win):
     from lpbfstudio.gui.dialogs import EstimateDialog
 
-    dlg = EstimateDialog(win.lib, ProcessSettings(), "P1")
+    dlg = EstimateDialog(win.lib, ProcessSettings(), "P1", win)
     dlg.add_segment()  # continues from the last segment
     assert dlg.table.rowCount() == 2 and dlg.table.cellWidget(1, 0).value() == dlg.table.cellWidget(0, 1).value()
     dlg.calculate()
@@ -242,7 +242,7 @@ def test_estimate_dialog_calculates_a_plan(win):
 def test_estimate_dialog_reports_an_invalid_plan(win):
     from lpbfstudio.gui.dialogs import EstimateDialog
 
-    dlg = EstimateDialog(win.lib, ProcessSettings(), "P1")
+    dlg = EstimateDialog(win.lib, ProcessSettings(), "P1", win)
     dlg.add_segment(10, 5, "P1")  # overlaps and runs backwards
     dlg.calculate()
     assert "c0392b" in dlg.result.text() and "Total" not in dlg.result.text()
@@ -252,7 +252,7 @@ def test_tools_dialog_calculates_ridge_and_power_table(win):
     from lpbfstudio import calc
     from lpbfstudio.gui.dialogs import ToolsDialog
 
-    dlg = ToolsDialog(win.current)
+    dlg = ToolsDialog(win.current, win)
     dlg.r_angle.setValue(60.0)
     assert dlg.r_out.text() == f"<b>{calc.ridge_for_angle(dlg.r_thick.value(), 60.0):.3f} mm</b>"
     dlg.p0.setValue(300.0)
@@ -263,7 +263,7 @@ def test_tools_dialog_calculates_ridge_and_power_table(win):
 def test_tools_dialog_without_a_set_uses_its_defaults(win):
     from lpbfstudio.gui.dialogs import ToolsDialog
 
-    dlg = ToolsDialog(None)
+    dlg = ToolsDialog(None, win)
     assert dlg.p0.value() == 285.0 and dlg.r_thick.value() == pytest.approx(0.09)
 
 
