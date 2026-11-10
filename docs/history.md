@@ -25,9 +25,9 @@ LPBF Studio never guesses, repairs or deletes anything in `.history/`. Any damag
 
 ## When history cannot be written
 
-A save never fails because of its history. If a history step fails, or the file is in one of the last five states above, the file is still saved and the save is reported as not recorded. A file changed outside history stays that way: later saves are not recorded either.
+A save never fails because of its history. If a history step fails, or the file is changed outside history, missing, deleted with the file present, unknown or unverifiable, the file is still saved and the save is not recorded. A file changed outside history stays that way: later saves are not recorded either.
 
-After an upgrade or a restore, a tracked file can be left changed outside history, because those operations do not write history. An internal operation can add a revision for such a file when the upgrade or restore records prove what happened. It has no command or menu entry yet. Files edited by hand or by other tools have no such route.
+After an upgrade or a restore, a tracked file can be left changed outside history, because those operations do not write history. Bringing such a file back into its history is not available in this build: there is no command or menu entry for it, and offering one needs separate authorization. Files edited by hand or by other tools have no such route either.
 
 ## Build job manifests
 
