@@ -1,0 +1,45 @@
+THIRD-PARTY LICENCES
+
+LPBF Studio's own source code is not licensed to you: see LICENSE (all rights reserved, published
+for reference only). This file lists the third-party software LPBF Studio uses, and the licences
+those packages declare. LPBF Studio does not copy or bundle any of their code in this repository;
+pip installs them separately from their own distributions.
+
+Evidence: the licence metadata (License-Expression, License field or classifier) and the licence
+files of the installed wheels, read on 2026-11-11 from the versions below. Other versions may
+differ; check the package's own metadata.
+
+Runtime (installed with LPBF Studio)
+  pydantic           2.14.3   MIT
+  pydantic-core      2.50.4   MIT                (dependency of pydantic)
+  annotated-types    0.8.0    MIT                (dependency of pydantic)
+  typing-extensions  4.16.0   PSF-2.0            (dependency of pydantic)
+  typing-inspection  0.4.5    MIT                (dependency of pydantic)
+  click              8.5.x    BSD-3-Clause
+  colorama           0.4.6    BSD (classifier; Windows only, dependency of click)
+
+Optional: desktop editor ("gui" extra)
+  PySide6-Essentials 6.12.0   LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only (or a Qt commercial licence)
+  shiboken6          6.12.0   LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only (or a Qt commercial licence)
+    LPBF Studio uses PySide6 under the LGPL-3.0 and imports it as an unmodified, separately installed
+    library. The Qt libraries inside these wheels contain further third-party components with their
+    own licences, listed in the Qt documentation ("Licenses Used in Qt").
+
+Development and tests ("dev" extra; not needed to run LPBF Studio)
+  pytest             9.2.0    MIT
+  pluggy             1.7.0    MIT
+  iniconfig          2.3.1    MIT
+  packaging          26.3     Apache-2.0 OR BSD-2-Clause
+  Pygments           2.21.0   BSD-2-Clause
+  exceptiongroup     1.3.1    MIT (classifier; Python 3.10 only)
+  tomli              2.5.0    MIT (Python 3.10 only)
+  coverage           7.16.2   Apache-2.0 (used for coverage measurement; not declared in pyproject.toml)
+
+Open items
+  - Redistribution. No installer or bundled binary of LPBF Studio exists. Shipping one would carry
+    Qt and PySide6 inside it, and then the LGPL-3.0 obligations apply in full: the licence text,
+    the Qt notices, a way to replace the Qt libraries, and access to the corresponding source of
+    the LGPL parts. That review belongs to the release work (Milestone F, F-AC4) and has not
+    been done.
+  - The project's own licence is proprietary. Its compatibility with each obligation above for a
+    future distribution has not been reviewed by counsel.

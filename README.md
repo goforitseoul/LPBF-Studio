@@ -1,7 +1,9 @@
 # LPBF Studio
 
-Parameter-set editor for laser powder bed fusion (LPBF) build preparation, modelled on the
-exposure-set concept of EOSPRINT 2.x's Parameter Editor. Version 0.1.0, first iteration.
+Parameter-set editor for laser powder bed fusion (LPBF) build preparation. Its exposure-set
+model follows the concept found in commercial build-preparation software such as EOSPRINT 2.x;
+it is an independent tool, not equivalent to or compatible with any vendor's software. Version
+0.1.0, first iteration. Start with the [user guide](docs/user_guide.md).
 
 ![Editor](docs/editor.png)
 
@@ -19,7 +21,8 @@ exposure-set concept of EOSPRINT 2.x's Parameter Editor. Version 0.1.0, first it
   - **Edge** has an edge offset, Method 1 (edge factor and threshold) and Method 2
     (minimum radius factor).
 - **Guard levels.** Every parameter is tagged free, caution or critical. The editor marks
-  the latter two with an amber or red dot, mirroring the "caged switch" idea.
+  the latter two with an amber or red dot and the word "caution" or "critical", mirroring the
+  "caged switch" idea.
 - **Locked reference sets.** These cannot be edited or deleted. You copy one to start a new
   set.
 - **Live analysis** of the selected set:
@@ -30,7 +33,8 @@ exposure-set concept of EOSPRINT 2.x's Parameter Editor. Version 0.1.0, first it
   - Rule checks. Examples: machine power and speed limits, layer-thickness range, an energy
     window, hatch distance against stripe width, skin thickness that is not a multiple of
     the layer thickness, positive ridge, skywriting off, a high power-reduction factor, and
-    infill skipping without skins.
+    infill skipping without skins. Selecting a finding opens the parameter it is about.
+  - Every formula, with its assumptions and limits, is in [docs/calculations.md](docs/calculations.md).
 - **DOE generator.** Builds full-factorial variants of a set, for example a hatch-distance ×
   layer-thickness matrix, with a name template such as `HD_{hatch_distance_mm}`.
 - **Compare** two sets parameter by parameter.
@@ -43,6 +47,9 @@ exposure-set concept of EOSPRINT 2.x's Parameter Editor. Version 0.1.0, first it
   X/Y scaling, platform temperature, part or layer exposure order, dosing, and laser and
   scanner limits.
 - **Import and export** as JSON (re-importable) or a CSV parameter table.
+- **Revision history.** Every write keeps an unchangeable copy in `<library>/.history/`
+  ([docs/history.md](docs/history.md)). The editor and CLI do not show the history status yet,
+  and build job manifests have no command or menu entry yet.
 
 ## Stack
 
@@ -163,7 +170,10 @@ src/lpbfstudio/
   defaults.py    locked example sets
   migration.py, upgrade.py           schema versions and file upgrades
   reconcile.py, reconcile_apply.py,
-  restore_record.py                  recovery after interrupted upgrades (docs/reconciliation.md)
+  restore.py, restore_record.py      recovery after interrupted upgrades (docs/reconciliation.md, docs/restore.md)
+  locks.py, fsprim.py                library locks and POSIX file-system primitives
+  history.py, outcomes.py            revision history and write outcomes (docs/history.md)
+  rebaseline.py, jobs.py             history after an upgrade or restore; build job manifests (no entry point yet)
   cli.py         `lpbf` command
   gui/           PySide6 editor (forms generated from model metadata)
 tests/           pytest suite
@@ -217,8 +227,14 @@ notes under `plans/`. Those are kept private and are not part of this repository
    signed/approved sets for production use.
 5. Packaging: a PyInstaller or Briefcase installer, licence-key check, and auto-update.
 
+## Reporting problems
+
+Open an issue at https://github.com/goforitseoul/LPBF-Studio/issues with the steps or command,
+the output, your operating system and your Python version.
+
 ## License
 
 Copyright (c) 2026 goforitseoul. All rights reserved. This source code is published for
 reference only; no licence is granted to use, copy, modify, merge, publish, distribute,
-sublicense, or sell copies of the software. See [LICENSE](LICENSE).
+sublicense, or sell copies of the software. See [LICENSE](LICENSE). Third-party packages and
+their licences are listed in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).
