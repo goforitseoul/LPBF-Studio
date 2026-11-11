@@ -78,9 +78,9 @@ LPBF_REQUIRE_GUI_TESTS=1 pytest    # fail, rather than skip, if Qt cannot load
 
 On Windows the POSIX lock, upgrade, reconcile and restore tests are skipped by design.
 
-## Known issues
+## Output encoding
 
-- On Windows, when the command line's output goes to a pipe or a file and the system code page is not UTF-8 (for example GBK), commands that print `µ` (`lpbf list`) fail with `UnicodeEncodeError`. Set `PYTHONIOENCODING=utf-8` (or `PYTHONUTF8=1`) before running them. An interactive console is not affected.
+On Windows, when the command line's output goes to a file or a pipe, it is written as UTF-8, whatever the system code page (for example GBK). Read such files as UTF-8. A console shows the text directly. To choose another encoding, set `PYTHONIOENCODING`; LPBF Studio then uses that. On Linux and macOS the output follows the system's locale, as before.
 
 ## Reporting problems
 

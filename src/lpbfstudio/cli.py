@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +30,32 @@ def _fail(msg: str) -> None:
     sys.exit(1)
 
 
-@click.group()
+def _utf8_when_redirected() -> None:
+    """Output encoding policy. On Windows, output that goes to a file or a pipe is written as UTF-8.
+
+    Python writes a redirected Windows stream in the ANSI code page (for example GBK), which cannot hold every
+    character LPBF Studio prints (``µ``, any set name), so ``lpbf list > out.txt`` used to fail with
+    UnicodeEncodeError. UTF-8 holds them all and gives the same bytes on every machine. A console keeps
+    Python's own Unicode console output, and an explicit choice (PYTHONIOENCODING, Python's UTF-8 mode) is
+    left alone. Other platforms are unchanged."""
+    if sys.platform != "win32" or os.environ.get("PYTHONIOENCODING") or sys.flags.utf8_mode:
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is None or stream.isatty() or codecs.lookup(stream.encoding).name == "utf-8":
+                continue
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, LookupError, OSError, ValueError):
+            continue  # not a reconfigurable text stream: leave it as it is
+
+
+class _Main(click.Group):
+    def main(self, *args, **kwargs):  # every entry: the lpbf script, python -m lpbfstudio, CliRunner
+        _utf8_when_redirected()
+        return super().main(*args, **kwargs)
+
+
+@click.group(cls=_Main)
 @click.option("--library", "library_path", type=click.Path(file_okay=False), envvar="LPBF_LIBRARY",
               help="Library folder (default ~/.lpbfstudio/library or $LPBF_LIBRARY).")
 @click.version_option(__version__, prog_name=APP_NAME)
