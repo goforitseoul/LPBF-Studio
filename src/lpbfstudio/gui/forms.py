@@ -51,6 +51,7 @@ class ModelForm(QWidget):
         self.obj = obj
         self.readonly = readonly
         self.widgets: dict[str, QWidget] = {}
+        self.guard_labels: dict[str, QLabel] = {}  # the guard level as text ("caution", "critical"); empty when free
         self._loading = False
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -71,12 +72,12 @@ class ModelForm(QWidget):
                 help_text = ("Use Rename in the toolbar to change the set name." if isinstance(obj, ExposureSet)
                              else "Sets refer to this profile by name, so the name cannot be changed here.")
             widget.setToolTip(help_text)
-            layout.addRow(self._make_label(meta.get("label", name), meta.get("guard", "free"), help_text), widget)
+            layout.addRow(self._make_label(name, meta.get("label", name), meta.get("guard", "free"), help_text), widget)
             self.widgets[name] = widget
 
     # ------------------------------------------------------------------ construction
 
-    def _make_label(self, text: str, guard: str, help_text: str) -> QWidget:
+    def _make_label(self, name: str, text: str, guard: str, help_text: str) -> QWidget:
         color, guard_tip = GUARD_STYLE.get(guard, ("", ""))
         box = QWidget()
         row = QHBoxLayout(box)
@@ -87,10 +88,16 @@ class ModelForm(QWidget):
         if color:
             marker.setStyleSheet(f"color: {color};")
             marker.setToolTip(guard_tip)
+        level = QLabel(str(getattr(guard, "value", guard)) if color else "")  # the guard as text, not colour alone
+        if color:
+            level.setStyleSheet(f"color: {color}; font-size: 8pt;")
+            level.setToolTip(guard_tip)
+        self.guard_labels[name] = level
         label = QLabel(text)
         label.setToolTip("\n".join(t for t in (help_text, guard_tip) if t))
         row.addStretch(1)
         row.addWidget(marker)
+        row.addWidget(level)
         row.addWidget(label)
         return box
 

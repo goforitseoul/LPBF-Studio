@@ -22,13 +22,14 @@ from ..models import (
     EXPOSURE_CLASSES, MAX_EXPOSURE_TYPES, PASS_ID_VERSION, Contour, ContourPass, ExposureSet, HatchPattern,
     MachineProfile, ProcessSettings, SetCategory, allowed_kinds, new_pass_id,
 )
-from ..paths import assign_field
-from ..validation import Severity, validate_set
+from ..paths import assign_field, get_path
+from ..validation import Scope, Severity, validate_set
 from .dialogs import CompareDialog, DoeDialog, EstimateDialog, ToolsDialog
 from .forms import ModelForm
 
 SEVERITY_COLOR = {Severity.ERROR: "#c0392b", Severity.WARNING: "#c98a00", Severity.INFO: "#2e86c1"}
 OBJ_ROLE = Qt.ItemDataRole.UserRole
+CHECK_ROLE = Qt.ItemDataRole.UserRole + 1  # (scope, path) of the finding in a checks-table row
 
 
 def color_icon(color: str, size: int = 14) -> QIcon:
@@ -203,6 +204,8 @@ class MainWindow(QMainWindow):
         self.analysis = QTabWidget()
         self.energy_table = self._table(["Exposure", "Region", "P [W]", "v [mm/s]", "h [mm]", "Energy input"])
         self.checks_table = self._table(["Severity", "Rule", "Parameter", "Message"])
+        self.checks_table.currentCellChanged.connect(lambda row, *_: self._go_to_check(row))
+        self.checks_table.cellClicked.connect(lambda row, _col: self._go_to_check(row))
         self.offset_table = self._table(["Scan line", "Offset from nominal contour [mm]"])
         self.analysis.addTab(self.energy_table, "Energy input")
         self.analysis.addTab(self.checks_table, "Checks")
@@ -605,8 +608,67 @@ class MainWindow(QMainWindow):
 
     def refresh_analysis(self) -> None:
         es = self.current
+        selected = self._check_target(self.checks_table.currentRow())
+        self.checks_table.blockSignals(True)  # rebuilding the table is not a new selection
         for t in (self.energy_table, self.checks_table, self.offset_table):
             t.setRowCount(0)
+        try:
+            self._fill_analysis(es)
+            for r in range(self.checks_table.rowCount()):  # keep the finding the user had selected
+                if selected is not None and self._check_target(r) == selected:
+                    self.checks_table.selectRow(r)
+                    break
+        finally:
+            self.checks_table.blockSignals(False)
+
+    def _check_target(self, row: int) -> tuple[str, str] | None:
+        item = self.checks_table.item(row, 0) if row >= 0 else None
+        return item.data(CHECK_ROLE) if item is not None else None
+
+    def _go_to_check(self, row: int) -> None:
+        """C-AC1: show the node a finding is about and focus its field. Reads only; the set is not changed."""
+        target = self._check_target(row)
+        if target is None or self.current is None:
+            return
+        scope, path = target
+        if scope != Scope.PARAMETER.value or not path:
+            where = "the set as a whole" if scope == Scope.SET.value else f"the {scope} settings"
+            self.statusBar().showMessage(f"This finding is about {where}; it is not a parameter of this set.", 8000)
+            return
+        try:
+            node = get_path(self.current, path)
+            field = None
+            if not isinstance(node, BaseModel):
+                parent, _, field = path.rpartition(".")
+                node = get_path(self.current, parent) if parent else self.current
+        except KeyError:
+            self.statusBar().showMessage(f"{path} is no longer a parameter of this set.", 8000)
+            return
+        item = self._tree_item_for(node)
+        if item is None:
+            self.statusBar().showMessage(f"{path} is not shown in the editor: the settings that hold it are not in use.", 8000)
+            return
+        if self.tree.currentItem() is not item:
+            self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
+        widget = self.form.widgets.get(field) if (field and self.form is not None and self.form.obj is node) else None
+        if field and widget is None:
+            self.statusBar().showMessage(f"{path} has no field in the editor.", 8000)
+            return
+        if widget is not None:
+            self.form_area.ensureWidgetVisible(widget)
+            widget.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _tree_item_for(self, obj: BaseModel) -> QTreeWidgetItem | None:
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.data(0, OBJ_ROLE) is obj:  # identity, not row position or label
+                return item
+            stack.extend(item.child(i) for i in range(item.childCount()))
+        return None
+
+    def _fill_analysis(self, es: ExposureSet | None) -> None:
         if es is None:
             return
         for m in calc.energy_summary(es):
@@ -624,6 +686,7 @@ class MainWindow(QMainWindow):
         for i in issues:
             self._add_row(self.checks_table, [i.severity.value, i.code, i.location, i.message],
                           SEVERITY_COLOR[i.severity])
+            self.checks_table.item(self.checks_table.rowCount() - 1, 0).setData(CHECK_ROLE, (i.scope.value, i.path))
         if not issues:
             self._add_row(self.checks_table, ["ok", "", "", "No issues found."], "#27ae60")
         n_err = sum(i.severity == Severity.ERROR for i in issues)
