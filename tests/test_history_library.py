@@ -746,36 +746,15 @@ def test_a_migration_folder_appearing_during_h_abandons_at_c(lib, monkeypatch):
 
 @posix
 def test_a_lock_refusal_is_in_phase_p_with_no_history(lib):
-    fd = os.open(lib.sets_dir, os.O_RDONLY | os.O_DIRECTORY)
-    pid = os.fork()
-    if pid == 0:  # another process, so that the lock really conflicts
-        fcntl.flock(os.open(lib.sets_dir, os.O_RDONLY | os.O_DIRECTORY), fcntl.LOCK_EX)
-        os.write(fd if False else 1, b"")
-        import time
-        time.sleep(60)
-        os._exit(0)
-    try:
-        import time
-        for _ in range(500):
-            probe = os.open(lib.sets_dir, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                fcntl.flock(probe, fcntl.LOCK_UN)
-            except BlockingIOError:
-                break
-            finally:
-                os.close(probe)
-            time.sleep(0.01)
+    # The conflicting lock is held by a separate, freshly started interpreter (the B2a holder), not by a fork of
+    # this test process, which may already run threads (Python 3.13 warns that forking it can deadlock).
+    with holder((lib.sets_dir, "ex")):
         before = hist(lib)
         with lib.collect_outcomes() as sink:
             with pytest.raises(LibraryLocked):
                 lib.save(new_set("H2"))
         assert (sink.last.history, sink.last.canonical_reason) == (H.NOT_APPLICABLE, CR.PRECONDITION_REFUSED)
         assert hist(lib) == before
-    finally:
-        os.kill(pid, 9)
-        os.waitpid(pid, 0)
-        os.close(fd)
 
 
 @posix
