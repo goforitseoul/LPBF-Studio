@@ -400,6 +400,10 @@ def import_cmd(ctx: click.Context, file: str, overwrite: bool) -> None:
         es = _lib(ctx).import_file(file, overwrite=overwrite)
     except LibraryError as exc:
         _fail(str(exc))
+    except ValueError as exc:  # malformed JSON or invalid values (pydantic's ValidationError is a ValueError)
+        errors = getattr(exc, "errors", None)
+        reason = errors()[0]["msg"] if callable(errors) and errors() else str(exc).splitlines()[0]
+        _fail(f"{Path(file).name} was not imported: {reason}")
     click.echo(f"imported {es.name}")
 
 

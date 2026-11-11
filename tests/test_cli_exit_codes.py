@@ -58,14 +58,62 @@ def test_success_exits_zero(world, args):
 def test_failure_has_its_exact_exit_code(world, args, code):
     res = run(world, *args)
     assert res.exit_code == code, res.output
-    if args != ("import", "{tmp}/bad.json"):  # see the expected failure below
-        assert not isinstance(res.exception, Exception) or isinstance(res.exception, SystemExit), repr(res.exception)
+    assert not isinstance(res.exception, Exception) or isinstance(res.exception, SystemExit), repr(res.exception)
 
 
-@pytest.mark.xfail(strict=True, reason="known defect: import_cmd catches only LibraryError, so malformed JSON ends in a traceback")
+# D1 (fixed 2026-11-10): malformed JSON used to end in a pydantic traceback. These run in-process and as a real subprocess,
+# which is what a user sees.
+
+
 def test_import_of_malformed_json_is_reported_without_a_traceback(world):
     res = run(world, "import", "{tmp}/bad.json")
-    assert isinstance(res.exception, SystemExit) and "error" in res.output
+    assert isinstance(res.exception, SystemExit) and res.exit_code == 1
+    assert res.output.strip().splitlines() == [res.output.strip().splitlines()[0]]  # one line
+    assert res.output.startswith("error: bad.json was not imported: ")
+    assert "Traceback" not in res.output and "validation error" not in res.output
+
+
+def test_import_of_a_valid_json_file_with_invalid_values_is_reported_cleanly(world):
+    import json
+
+    data = json.loads((world / "set.json").read_text(encoding="utf-8"))
+    data["layer_thickness_mm"] = "thick"
+    (world / "badvalue.json").write_text(json.dumps(data), encoding="utf-8")
+    res = run(world, "import", "{tmp}/badvalue.json")
+    assert res.exit_code == 1 and isinstance(res.exception, SystemExit)
+    assert res.output.startswith("error: badvalue.json was not imported: ") and "Traceback" not in res.output
+    assert not (world / "lib/sets/IN.json").exists()
+
+
+def test_import_of_malformed_json_in_a_real_process(world):
+    import os
+    import subprocess
+    import sys
+
+    import lpbfstudio
+
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(os.path.dirname(os.path.dirname(lpbfstudio.__file__))),
+                                                       os.environ.get("PYTHONPATH", "")]))
+    p = subprocess.run([sys.executable, "-m", "lpbfstudio", "--library", str(world / "lib"), "import", str(world / "bad.json")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert p.returncode == 1 and "Traceback" not in p.stderr and p.stdout == ""
+    assert p.stderr.startswith("error: bad.json was not imported: ")
+
+
+def test_valid_import_is_unchanged(world):
+    res = run(world, "import", "{tmp}/set.json")
+    assert res.exit_code == 0 and res.output == "imported IN\n"
+
+
+def test_an_unexpected_error_during_import_still_shows_its_traceback(world, monkeypatch):
+    from lpbfstudio import library
+
+    def broken(self, path, overwrite=False):
+        raise RuntimeError("a programming error")
+
+    monkeypatch.setattr(library.Library, "import_file", broken)
+    res = run(world, "import", "{tmp}/set.json")
+    assert isinstance(res.exception, RuntimeError)  # not swallowed as a user error
 
 
 @pytest.mark.parametrize("returned", [0, 3])

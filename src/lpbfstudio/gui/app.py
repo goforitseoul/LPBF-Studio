@@ -261,12 +261,16 @@ class MainWindow(QMainWindow):
     def _on_library_selection(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         if current is None:
             return
+        name = current.data(OBJ_ROLE)  # read now: choosing Save refreshes the list, which deletes this item
         if not self.confirm_discard():
             self.library_list.blockSignals(True)
             self.library_list.setCurrentItem(previous)
             self.library_list.blockSignals(False)
             return
-        self.load_set(current.data(OBJ_ROLE))
+        shown = self.library_list.currentItem()
+        if shown is None or shown.data(OBJ_ROLE) != name:
+            self.refresh_library(select=name)  # the save reselected the saved set; show the one asked for
+        self.load_set(name)
 
     def confirm_discard(self) -> bool:
         if not self.dirty or self.current is None:
