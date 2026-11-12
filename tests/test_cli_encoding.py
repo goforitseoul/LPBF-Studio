@@ -94,7 +94,19 @@ class Stream(io.TextIOWrapper):
         return self._tty
 
 
-def policy(monkeypatch, platform, stdout, stderr=None, env=None):
+class Flags:
+    """``sys.flags`` with a chosen UTF-8 mode: Python turns that mode on by itself under the C locale (Linux CI)."""
+
+    def __init__(self, utf8_mode):
+        self.utf8_mode = utf8_mode
+        self._real = sys.flags
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def policy(monkeypatch, platform, stdout, stderr=None, env=None, utf8_mode=0):
+    monkeypatch.setattr(cli.sys, "flags", Flags(utf8_mode))
     monkeypatch.setattr(cli.sys, "platform", platform)
     monkeypatch.setattr(cli.sys, "stdout", stdout)
     monkeypatch.setattr(cli.sys, "stderr", stderr or Stream("ascii", tty=True))
@@ -127,6 +139,12 @@ def test_a_console_is_left_as_it_is(monkeypatch):
 def test_pythonioencoding_is_left_as_it_is(monkeypatch):
     out = Stream("gbk")
     policy(monkeypatch, "win32", out, env={"PYTHONIOENCODING": "gbk"})
+    assert out.encoding == "gbk"
+
+
+def test_pythons_utf8_mode_is_left_as_it_is(monkeypatch):
+    out = Stream("gbk")  # an encoding chosen explicitly for the stream while the mode is on
+    policy(monkeypatch, "win32", out, utf8_mode=1)
     assert out.encoding == "gbk"
 
 
