@@ -403,16 +403,21 @@ class Library:
     def _locate(self, name: str) -> Path | None:
         """The file that holds the set called ``name``, or None."""
         direct = self._file(name)
-        candidates = [direct] + [f for f in sorted(self.sets_dir.glob("*.json")) if f != direct]
-        for f in candidates:
-            if not f.exists():
-                continue
-            try:
-                if self._read(f).name == name:
-                    return f
-            except (OSError, ValueError):
-                continue
+        if self._holds(direct, name):  # the usual case: the folder is listed only when the set is not in its own file
+            return direct
+        for f in sorted(self.sets_dir.glob("*.json")):
+            if f != direct and self._holds(f, name):
+                return f
         return None
+
+    def _holds(self, f: Path, name: str) -> bool:
+        """Whether ``f`` exists and holds the set called ``name``; a file that cannot be read or parsed holds none."""
+        if not f.exists():
+            return False
+        try:
+            return self._read(f).name == name
+        except (OSError, ValueError):
+            return False
 
     def _conflict(self, name: str, f: Path) -> str:
         try:
