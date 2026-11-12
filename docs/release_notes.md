@@ -1,5 +1,16 @@
 # Release notes
 
+## Unreleased: fewer history scans (R7-B, 2026-11-12)
+
+**Changes**
+- A copy examines the stored revisions once instead of twice. Finalizing a build job examines them once for all its sets instead of once per set, and still reads every pinned revision again before pinning it.
+- Examining the stored revisions takes between a half and two thirds of the time it took (measured on Linux, Python 3.13 and 3.10).
+- Looking a set up by name no longer lists the folder when the set is in the file named after it.
+
+Nothing about what is stored, checked or reported has changed: every record and every stored revision is still verified in full by each operation, and results, refusals and messages are the same.
+
+**Still true.** Saves take longer as a library's history grows.
+
 ## Unreleased: revision history (ABP-0, 2026-11-08)
 
 **Changes**
