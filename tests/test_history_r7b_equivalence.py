@@ -542,6 +542,19 @@ def test_a_library_root_outside_ascii(tmp_path, monkeypatch):
     assert_equivalent(monkeypatch, root)
 
 
+def test_one_object_is_classified_the_same_from_a_path_and_from_text(tmp_path):
+    root = tmp_path / "lib"
+    s_many(root)
+    folder = objdir(root)
+    want = plain(ref._classify_object(folder, "exposure_set", ID_A))
+    assert plain(h._classify_object(folder, "exposure_set", ID_A)) == want
+    assert plain(h._classify_object(str(folder), "exposure_set", ID_A)) == want
+    with h.read_cache():  # and the two forms share one memory entry
+        h._classify_object(folder, "exposure_set", ID_A)
+        h._classify_object(str(folder), "exposure_set", ID_A)
+        assert list(h._READ_CACHE.get()) == [str(folder)]
+
+
 def test_a_root_given_as_text(tmp_path):
     root = tmp_path / "lib"
     s_many(root)

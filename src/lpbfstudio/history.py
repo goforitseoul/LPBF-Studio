@@ -175,7 +175,7 @@ def _read_file(path: Path | str) -> bytes:
         return fh.read()
 
 
-def _read_entry(path: Path) -> bytes:
+def _read_entry(path: Path | str) -> bytes:
     """All the bytes of a file under ``.history``, already examined as regular; a link there is never followed."""
     _at("scan.read")
     fd = _os_open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
@@ -378,39 +378,45 @@ class ObjectView:
     a_max: int = 0
 
 
-def _names(path: Path) -> list[str]:
+def _names(path: Path | str) -> list[str]:
     return sorted(os.listdir(path))
 
 
-def _classify_revision(rev: Path, object_type: str, object_id: str, seq: str) -> Record | None:
-    """The committed record of a revision folder; None if incomplete; ``_Damaged`` if neither (§5.2)."""
+# The scan below names every entry by text: the folder's path, the separator, the entry's name as the folder listed it.
+# That is the path ``folder / name`` would give, without building a ``Path`` for each of the thousands of entries.
+_SEP = os.sep
+
+
+def _classify_revision(rev: str, object_type: str, object_id: str, seq: str) -> Record | None:
+    """The committed record of the revision folder ``rev``, whose name is ``seq``; None if incomplete; ``_Damaged`` if
+    neither (§5.2)."""
     names = _names(rev)
     for name in names:
-        if not _is_regular(_lstat(rev / name)):
-            raise _Damaged(f"{rev.name}/{name} is not a regular file")
+        if not _is_regular(_lstat(rev + _SEP + name)):
+            raise _Damaged(f"{seq}/{name} is not a regular file")
     temps = [n for n in names if _RECORD_TMP.match(n)]
     other = set(names) - {CONTENT, RECORD} - set(temps)
     if other:
-        raise _Damaged(f"{rev.name} has the unexpected entries {sorted(other)}")
+        raise _Damaged(f"{seq} has the unexpected entries {sorted(other)}")
     if RECORD not in names:
         if len(temps) > 1:
-            raise _Damaged(f"{rev.name} has more than one record temporary file")
+            raise _Damaged(f"{seq} has more than one record temporary file")
         return None
     if temps:
-        raise _Damaged(f"{rev.name} has a record and a record temporary file")
+        raise _Damaged(f"{seq} has a record and a record temporary file")
     try:
-        record = parse_record(_read_entry(rev / RECORD), object_type, object_id, seq)
+        record = parse_record(_read_entry(rev + _SEP + RECORD), object_type, object_id, seq)
     except _Invalid as exc:
-        raise _Damaged(f"{rev.name}/{RECORD}: {exc}") from None
+        raise _Damaged(f"{seq}/{RECORD}: {exc}") from None
     if record.kind == "deleted":
         if CONTENT in names:
-            raise _Damaged(f"{rev.name} is a tombstone with a blob")
+            raise _Damaged(f"{seq} is a tombstone with a blob")
         return record
     if CONTENT not in names:
-        raise _Damaged(f"{rev.name} has a content record and no blob")
-    blob = _read_entry(rev / CONTENT)
+        raise _Damaged(f"{seq} has a content record and no blob")
+    blob = _read_entry(rev + _SEP + CONTENT)
     if len(blob) != record.byte_length or sha256(blob) != record.hash:
-        raise _Damaged(f"{rev.name}: the blob does not match its record")
+        raise _Damaged(f"{seq}: the blob does not match its record")
     return record
 
 
@@ -444,16 +450,17 @@ def read_cache(settle_ns: int = 0) -> Iterator[None]:
         _READ_CACHE.reset(token)
 
 
-def _signature(folder: Path) -> tuple | None:
+def _signature(folder: str) -> tuple | None:
     try:
-        a, b = _lstat(folder), _lstat(folder / REVISIONS)
+        a, b = _lstat(folder), _lstat(folder + _SEP + REVISIONS)
     except OSError:
         return None
     return a.st_ino, a.st_mtime_ns, b.st_ino, b.st_mtime_ns
 
 
-def _classify_object(folder: Path, object_type: str, name: str) -> ObjectView:
+def _classify_object(folder: Path | str, object_type: str, name: str) -> ObjectView:
     """§6.1.2. Raises ``OSError`` when something cannot be examined; that is row 0, not damage."""
+    folder = os.fspath(folder)
     cache = _READ_CACHE.get()
     before = time.time_ns() if cache is not None else 0
     signature = _signature(folder) if cache is not None else None  # taken first, so a change during the scan is not cached
@@ -472,7 +479,7 @@ def _classify_object(folder: Path, object_type: str, name: str) -> ObjectView:
     return view
 
 
-def _classify_inner(folder: Path, object_type: str, name: str) -> ObjectView:
+def _classify_inner(folder: str, object_type: str, name: str) -> ObjectView:
     if not _ID.match(name):
         raise _Damaged(f"{name!r} is not an object id")
     if not _is_real_dir(_lstat(folder)):
@@ -483,7 +490,7 @@ def _classify_inner(folder: Path, object_type: str, name: str) -> ObjectView:
     if other:
         raise _Damaged(f"{name} has the unexpected entries {sorted(other)}")
     for t in temps:
-        if not _is_regular(_lstat(folder / t)):
+        if not _is_regular(_lstat(folder + _SEP + t)):
             raise _Damaged(f"{t} is not a regular file")
     if IDENTITY not in names:
         if REVISIONS in names or len(temps) > 1:
@@ -491,26 +498,26 @@ def _classify_inner(folder: Path, object_type: str, name: str) -> ObjectView:
         return ObjectView(name, ObjectState.D1)
     if temps:
         raise _Damaged(f"{name} has an identity and an identity temporary file")
-    if not _is_regular(_lstat(folder / IDENTITY)):
+    if not _is_regular(_lstat(folder + _SEP + IDENTITY)):
         raise _Damaged(f"{IDENTITY} is not a regular file")
     try:
-        _valid_identity(_read_entry(folder / IDENTITY), object_type, name)
+        _valid_identity(_read_entry(folder + _SEP + IDENTITY), object_type, name)
     except _Invalid as exc:
         raise _Damaged(f"{IDENTITY}: {exc}") from None
     if REVISIONS not in names:
         return ObjectView(name, ObjectState.D2)
-    revisions = folder / REVISIONS
+    revisions = folder + _SEP + REVISIONS
     if not _is_real_dir(_lstat(revisions)):
         raise _Damaged(f"{REVISIONS} is not a real folder")
     seqs = _names(revisions)
     for s in seqs:
         if not _SEQ.match(s) or s == "00000000":
             raise _Damaged(f"{REVISIONS}/{s} is not a revision number")
-        if not _is_real_dir(_lstat(revisions / s)):
+        if not _is_real_dir(_lstat(revisions + _SEP + s)):
             raise _Damaged(f"{REVISIONS}/{s} is not a real folder")
     if [int(s) for s in seqs] != list(range(1, len(seqs) + 1)):
         raise _Damaged(f"{name} has a gap in its revision numbers")
-    found = [(s, _classify_revision(revisions / s, object_type, name, s)) for s in seqs]
+    found = [(s, _classify_revision(revisions + _SEP + s, object_type, name, s)) for s in seqs]
     committed = [r for _, r in found if r is not None]
     incomplete = tuple(s for s, r in found if r is None)
     if not committed:
@@ -553,7 +560,8 @@ def scan_objects(root: Path | str, object_type: ObjectType) -> list[ObjectView]:
         folder = objects / object_type.value
         if not _fixed_folder(folder):
             return []
-        return [_classify_object(folder / name, object_type.value, name) for name in _names(folder)]
+        base = str(folder) + _SEP
+        return [_classify_object(base + name, object_type.value, name) for name in _names(folder)]
     except OSError as exc:
         raise Unverifiable(str(exc), exc.errno) from exc
 
