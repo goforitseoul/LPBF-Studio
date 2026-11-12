@@ -9,8 +9,8 @@ Layout, under ``<library>/.history/``::
 The resolver reads only and takes no lock. It fails closed: any structure that no protocol step or interruption can
 produce is damage, and damage makes every path of that type ``unknown``. Nothing here deletes, repairs or rewrites
 anything under ``.history/``, and there is no mutable index: every answer comes from the immutable revisions. Inside one
-batch (``read_cache``) an object already verified in full is not read again while its folders are unchanged; that memory
-ends with the batch and nothing of it is ever written.
+batch or one operation (``read_cache``) an object already verified in full is not read again while its folders are
+unchanged; that memory ends with the batch or operation and nothing of it is ever written.
 
 Entry types come from an examination that does not follow links. On Windows a junction reports as a plain directory, so
 the reparse-point attribute decides there, not ``S_ISLNK`` or ``isjunction`` (ABP-0.1, EG-5).
@@ -32,6 +32,7 @@ import platform
 import re
 import secrets
 import stat
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -422,16 +423,24 @@ def _valid_identity(raw: bytes, object_type: str, object_id: str) -> None:
 
 
 _READ_CACHE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("lpbf_history_read_cache", default=None)
+_READ_SETTLE: contextvars.ContextVar[int] = contextvars.ContextVar("lpbf_history_read_settle", default=0)
+
+# For the memory of one operation (a copy, a finalization): an object is remembered only if its folders had been left
+# unchanged for this long when they were examined. A change made after that then always shows in their modification
+# times, whatever the resolution of the file system's clock (FAT keeps two seconds).
+OPERATION_SETTLE_NS = 2_000_000_000
 
 
 @contextlib.contextmanager
-def read_cache() -> Iterator[None]:
+def read_cache(settle_ns: int = 0) -> Iterator[None]:
     """Inside a batch of writes, an object verified in full with no incomplete folder is not read again while its object
-    and ``revisions`` folders are unchanged: a new revision or entry changes them. Memory only, for this block only."""
-    token = _READ_CACHE.set({})
+    and ``revisions`` folders are unchanged: a new revision or entry changes them. Memory only, for this block only.
+    With ``settle_ns`` an object is remembered only if both folders were last changed at least that long before."""
+    token, settle = _READ_CACHE.set({}), _READ_SETTLE.set(settle_ns)
     try:
         yield
     finally:
+        _READ_SETTLE.reset(settle)
         _READ_CACHE.reset(token)
 
 
@@ -446,6 +455,7 @@ def _signature(folder: Path) -> tuple | None:
 def _classify_object(folder: Path, object_type: str, name: str) -> ObjectView:
     """§6.1.2. Raises ``OSError`` when something cannot be examined; that is row 0, not damage."""
     cache = _READ_CACHE.get()
+    before = time.time_ns() if cache is not None else 0
     signature = _signature(folder) if cache is not None else None  # taken first, so a change during the scan is not cached
     if signature is not None:
         known = cache.get(folder)
@@ -456,7 +466,9 @@ def _classify_object(folder: Path, object_type: str, name: str) -> ObjectView:
     except _Damaged as exc:
         return ObjectView(name, ObjectState.D5, detail=str(exc))
     if signature is not None and view.state in (ObjectState.D3, ObjectState.D4) and not view.incomplete:
-        cache[folder] = (signature, view)
+        settle = _READ_SETTLE.get()
+        if settle == 0 or max(signature[1], signature[3]) <= before - settle:
+            cache[folder] = (signature, view)
     return view
 
 

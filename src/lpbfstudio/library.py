@@ -522,12 +522,14 @@ class Library:
                 raise LibraryError(f"{direct.name} cannot be read: {str(exc).splitlines()[0]}") from exc
         raise LibraryError(f"no exposure set named {name!r}")
 
-    def _write(self, es: ExposureSet, f: Path, scope: _Scope, intent: _Intent) -> None:
-        """Phases H, C and V of writing one set. The model is serialized once, here, before any history step."""
+    def _write(self, es: ExposureSet, f: Path, scope: _Scope, intent: _Intent, one_scan: bool = False) -> None:
+        """Phases H, C and V of writing one set. The model is serialized once, here, before any history step. With
+        ``one_scan``, phase H resolves its paths from one examination of history, forgotten before phase C begins."""
         text = self._text(es)
-        hr = _history.phase_h_write(self.root, _SETS, self._rel(f), text, new_operation=intent.new_operation,
-                                    new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined,
-                                    lock_change="locked" if es.locked else None)
+        with _history.read_cache(_history.OPERATION_SETTLE_NS) if one_scan else contextlib.nullcontext():
+            hr = _history.phase_h_write(self.root, _SETS, self._rel(f), text, new_operation=intent.new_operation,
+                                        new_source=intent.new_source, overwrite_undefined=intent.overwrite_undefined,
+                                        lock_change="locked" if es.locked else None)
         _phase_c(scope, hr, lambda: _atomic_write(f, text))
 
     def _copy_source(self, f: Path | None) -> Callable[[], dict]:
@@ -604,7 +606,8 @@ class Library:
             es.locked = False
             if es.description and not es.description.startswith("Copy of"):
                 es.description = f"Copy of {source}. {es.description}"
-            self._write(es, self._file(new_name), scope, _Intent("copy", "copied", self._copy_source(self._locate(source))))
+            intent = _Intent("copy", "copied", self._copy_source(self._locate(source)))
+            self._write(es, self._file(new_name), scope, intent, one_scan=True)  # the target, then the source
             return es
 
     def rename(self, old: str, new: str) -> ExposureSet:

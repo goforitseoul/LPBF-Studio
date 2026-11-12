@@ -252,15 +252,16 @@ def finalize(lib: Library, job_id: str) -> JobOutcome:
     pins: list[dict] = []
     refused: list[dict] = []
     warnings: list[str] = []
-    for item in draft["exposure_sets"]:  # step 2
-        f = lib._locate(item["name"])
-        _pin(lib, h.ObjectType.EXPOSURE_SET, lib._rel(f) if f is not None else None, item["name"],
-             {"role": item["role"], "z_range": item["z_range"]}, pins, refused, warnings)
-    lib.load_machines()
-    machine = lib._machine_source.get(draft["machine_name"])
-    _pin(lib, h.ObjectType.MACHINE_PROFILE, lib._rel(machine) if machine is not None else None, draft["machine_name"],
-         {"resolved_from_machine_name": draft["machine_name"]}, pins, refused, warnings)
-    _pin(lib, h.ObjectType.PROCESS_SETTINGS, "process.json", "process.json", {}, pins, refused, warnings)
+    with h.read_cache(h.OPERATION_SETTLE_NS):  # step 2: one scan of each type; every pinned blob is still read again
+        for item in draft["exposure_sets"]:
+            f = lib._locate(item["name"])
+            _pin(lib, h.ObjectType.EXPOSURE_SET, lib._rel(f) if f is not None else None, item["name"],
+                 {"role": item["role"], "z_range": item["z_range"]}, pins, refused, warnings)
+        lib.load_machines()
+        machine = lib._machine_source.get(draft["machine_name"])
+        _pin(lib, h.ObjectType.MACHINE_PROFILE, lib._rel(machine) if machine is not None else None, draft["machine_name"],
+             {"resolved_from_machine_name": draft["machine_name"]}, pins, refused, warnings)
+        _pin(lib, h.ObjectType.PROCESS_SETTINGS, "process.json", "process.json", {}, pins, refused, warnings)
     if refused:
         return stop("input_not_pinnable", refused_inputs=tuple(refused))
 
