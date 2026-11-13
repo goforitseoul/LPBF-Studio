@@ -384,15 +384,19 @@ def main() -> None:
                 shutil.copytree(ROOT / "src", work / "src", ignore=shutil.ignore_patterns("__pycache__"))
                 shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__", "legacy_build"))
                 (work / target).write_text(text, encoding="utf-8", newline="\n")
+                # The child writes its report as UTF-8 and it is read as UTF-8, whatever the console code page is
+                # (on a Windows PC set to GBK, non-ASCII test output otherwise stops the decoding of the whole report).
                 env = {**os.environ, "PYTHONPATH": str(work / "src"), "PYTHONDONTWRITEBYTECODE": "1",
-                       "LPBF_REQUIRE_GUI_TESTS": "1", "QT_QPA_PLATFORM": "offscreen"}
+                       "LPBF_REQUIRE_GUI_TESTS": "1", "QT_QPA_PLATFORM": "offscreen", "PYTHONIOENCODING": "utf-8"}
                 where = subprocess.run([PY, "-c", "import lpbfstudio.history as r; print(r.__file__)"], cwd=work,
-                                       capture_output=True, text=True, env=env).stdout.strip()
+                                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                       env=env).stdout.strip()
                 if not os.path.realpath(where).startswith(os.path.realpath(work)):
                     lines.append(f"{mid} INVALID: the mutated copy is not the one imported ({where})")
                     continue
                 p = subprocess.run([PY, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-rfE", "-o", "addopts=", *extra, *files],
-                                   cwd=work, capture_output=True, text=True, env=env, timeout=1800)
+                                   cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   env=env, timeout=1800)
                 failed = failed_tests(p.stdout)
                 hit = [t for t in failed if t in expected]
                 other = [t for t in failed if t not in expected]
